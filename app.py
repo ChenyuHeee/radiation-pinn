@@ -9,6 +9,7 @@ import sys
 import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+_BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 import streamlit as st
 import numpy as np
@@ -40,8 +41,10 @@ PHI_RANGE = (0.8, 1.4)
 
 # ======================== 缓存模型加载 ========================
 @st.cache_resource
-def load_model(ckpt_path, config_path="src/configs/default.yaml"):
+def load_model(ckpt_path, config_path=None):
     """加载模型和配置（只执行一次）。"""
+    if config_path is None:
+        config_path = os.path.join(_BASE_DIR, "src/configs/default.yaml")
     with open(config_path, "r", encoding="utf-8") as f:
         cfg = yaml.safe_load(f)
     device = "cpu"  # Streamlit 中用 CPU 更稳定
@@ -286,7 +289,7 @@ def main():
     st.sidebar.header("📂 模型配置")
 
     # 查找可用的 checkpoint
-    ckpt_dir = "checkpoints"
+    ckpt_dir = os.path.join(_BASE_DIR, "checkpoints")
     ckpt_files = []
     if os.path.exists(ckpt_dir):
         ckpt_files = [f for f in os.listdir(ckpt_dir) if f.endswith(".pt")]
