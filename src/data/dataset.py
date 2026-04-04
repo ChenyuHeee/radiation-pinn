@@ -85,6 +85,8 @@ class FlameDataset(Dataset):
             return
         from .preprocess import FUEL_NAME_TO_ID
         for _, row in df.iterrows():
+            if pd.isna(row["hab_mm"]) or pd.isna(row["phi"]):
+                continue
             fuel_name = row.get("fuel_name", "")
             fuel_id = FUEL_NAME_TO_ID.get(fuel_name, 0)
             phi_norm = (row["phi"] - phi_range[0]) / (phi_range[1] - phi_range[0])

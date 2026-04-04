@@ -21,7 +21,7 @@ env/
 .DS_Store
 
 # Training outputs
-checkpoints/
+# checkpoints/  # ← 现在需要跟踪已训练模型
 results/
 logs/
 runs/
@@ -34,3 +34,8 @@ hh/
 .ipynb_checkpoints/
 _test_*.py
 _extract_*.py
+_debug_*.py
+_quick_test.py
+_medium_test.py
+_full_train.py
+_verify_model.py

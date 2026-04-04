@@ -14,7 +14,8 @@ class PDELoss(nn.Module):
     """
 
     def __init__(self, rho: float = 0.3, cp: float = 1200.0,
-                 vz: float = 0.5, k_thermal: float = 0.06):
+                 vz: float = 0.5, k_thermal: float = 0.06,
+                 z_max: float = 0.09):
         """简化假设的物性参数。
 
         Args:
@@ -22,12 +23,12 @@ class PDELoss(nn.Module):
             cp: 比热 J/(kg·K)
             vz: 轴向速度 m/s (层流扩散火焰典型值)
             k_thermal: 导热系数 W/(m·K) (1000K 级别)
+            z_max: 最大高度 m (用于归一化坐标修正)
         """
         super().__init__()
-        self.rho = rho
-        self.cp = cp
-        self.vz = vz
-        self.k_thermal = k_thermal
+        # 非量纲化 Peclet 数 Pe = ρ cp vz L / k
+        self.Pe_inv = k_thermal / (rho * cp * vz * z_max)  # ~0.0037
+        self.vz_over_L = vz / z_max  # 用于碳烟方程
 
     def forward(self, model, inputs: torch.Tensor,
                 fuel_ids: torch.Tensor) -> dict:
@@ -53,31 +54,26 @@ class PDELoss(nn.Module):
         z = inputs[:, 1:2]
         r = inputs[:, 2:3]
 
-        # ─── 能量方程残差 ───
-        dT_dz = self._grad(T, inputs, 1)    # ∂T/∂z
-        dT_dr = self._grad(T, inputs, 2)    # ∂T/∂r
-        d2T_dz2 = self._grad(dT_dz, inputs, 1)  # ∂²T/∂z²
-        d2T_dr2 = self._grad(dT_dr, inputs, 2)  # ∂²T/∂r²
+        # ─── 能量方程残差（非量纲化形式）───
+        # 输入为归一化坐标 z̃=z/L，autograd 给出 dT/dz̃
+        # 非量纲化能量方程: dT/dz̃ - Pe⁻¹ · ∇̃²T = 0
+        dT_dz = self._grad(T, inputs, 1)    # ∂T/∂z̃
+        dT_dr = self._grad(T, inputs, 2)    # ∂T/∂r̃
+        d2T_dz2 = self._grad(dT_dz, inputs, 1)  # ∂²T/∂z̃²
+        d2T_dr2 = self._grad(dT_dr, inputs, 2)  # ∂²T/∂r̃²
 
-        # 轴对称: (1/r)·∂(r·∂T/∂r)/∂r = ∂²T/∂r² + (1/r)·∂T/∂r
-        # 注意 r=0 时用 L'Hôpital: lim(r→0) (1/r)·∂T/∂r = ∂²T/∂r²
-        r_safe = r.clamp(min=1e-6)  # 避免除零
+        r_safe = r.clamp(min=1e-6)
         laplacian_r = d2T_dr2 + dT_dr / r_safe
 
-        # 简化：忽略化学源项和辐射散热项（在训练初期）
-        energy_res = (self.rho * self.cp * self.vz * dT_dz
-                      - self.k_thermal * laplacian_r
-                      - self.k_thermal * d2T_dz2)
+        # T/1000 使残差量级 ≈ O(1)
+        energy_res = (dT_dz / 1000.0
+                      - self.Pe_inv * (laplacian_r + d2T_dz2) / 1000.0)
 
         # ─── 碳烟输运方程残差 ───
-        dfv_dz = self._grad(fv, inputs, 1)  # ∂fv/∂z
+        dfv_dz = self._grad(fv, inputs, 1)  # ∂fv/∂z̃
 
-        # Arrhenius 源项
-        src = model.soot_source_terms(T, Y_prec, Y_O2, fv)
-        soot_res = (self.vz * dfv_dz
-                    - src["nucleation"]
-                    - src["growth"]
-                    + src["oxidation"])
+        # 简化碳烟约束: fv 应随 z 平滑变化
+        soot_res = dfv_dz
 
         # MSE 残差
         loss_energy = torch.mean(energy_res ** 2)

@@ -15,7 +15,8 @@ class DataLoss(nn.Module):
         """NaN-safe MSE: 跳过含 NaN 的样本(初始化阶段可能出现)。"""
         valid = torch.isfinite(pred) & torch.isfinite(target)
         if not valid.any():
-            return torch.tensor(0.0, device=pred.device)
+            # 返回带梯度的零损失，避免 autograd 断裂
+            return (pred * 0.0).sum()
         return torch.nn.functional.mse_loss(pred[valid], target[valid])
 
     def forward(self, predictions: dict, targets: dict,
@@ -32,11 +33,11 @@ class DataLoss(nn.Module):
         """
         losses = {}
 
-        # 温度
+        # 温度 (归一化：除以 T_scale² 使梯度量级合理)
         if masks["T_K"].any():
             m = masks["T_K"]
-            T_pred = predictions["T"][m].squeeze(-1)
-            T_true = targets["T_K"][m]
+            T_pred = predictions["T"][m].squeeze(-1) / 1000.0
+            T_true = targets["T_K"][m] / 1000.0
             losses["T"] = self._safe_mse(T_pred, T_true)
 
         # 碳烟
@@ -46,11 +47,11 @@ class DataLoss(nn.Module):
             fv_true = targets["fv"][m]
             losses["fv"] = self._safe_mse(fv_pred, fv_true)
 
-        # 辐射 (q_rad 仅在 compute_radiation() 后可用)
+        # 辐射 (q_rad 仅在 compute_radiation() 后可用，归一化)
         if "q_rad" in predictions and masks["q_rad"].any():
             m = masks["q_rad"]
-            q_pred = predictions["q_rad"][m]
-            q_true = targets["q_rad"][m]
+            q_pred = predictions["q_rad"][m] / 1000.0
+            q_true = targets["q_rad"][m] / 1000.0
             losses["rad"] = self._safe_mse(q_pred, q_true)
 
         # 组分 (只比较有标注的组分通道)

@@ -61,7 +61,7 @@ class Trainer:
         # 固定权重（Phase 1/2 使用）
         self.fixed_weights = FixedWeights({
             "T": 1.0, "fv": 1.0, "rad": 1.0,
-            "energy": 1.0, "soot": 1.0, "bc": 1.0,
+            "energy": 0.01, "soot": 0.01, "bc": 0.1,
         })
 
         # 优化器
@@ -157,6 +157,8 @@ class Trainer:
             masks = {k: v.to(self.device) for k, v in masks.items()}
 
             def closure():
+                nonlocal all_losses
+                all_losses = {}
                 self.optimizer.zero_grad()
                 out = self.model(inputs, fuel_ids)
                 data_losses = self.data_loss_fn(out, targets, masks)
@@ -178,11 +180,14 @@ class Trainer:
 
                 # 加权合并
                 if phase["name"] == "joint":
-                    total, _ = self.adaptive_weights(all_losses)
+                    total, _ = self.fixed_weights(all_losses)
                 else:
                     total, _ = self.fixed_weights(all_losses)
 
                 total.backward()
+                # 梯度裁剪防止爆炸
+                torch.nn.utils.clip_grad_norm_(
+                    self.model.parameters(), max_norm=1.0)
                 return total
 
             if use_lbfgs and self.lbfgs is not None:

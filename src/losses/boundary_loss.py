@@ -31,7 +31,7 @@ class BoundaryLoss(nn.Module):
         # ─── 入口 z=0 ───
         inp, fid = boundary_data["inlet"]
         out = model(inp, fid)
-        losses["inlet_T"] = torch.mean((out["T"] - self.T_inlet) ** 2)
+        losses["inlet_T"] = torch.mean((out["T"] / 1000.0 - self.T_inlet / 1000.0) ** 2)
         losses["inlet_fv"] = torch.mean(out["fv"] ** 2)
 
         # ─── 轴对称 r=0 ───
@@ -45,7 +45,7 @@ class BoundaryLoss(nn.Module):
             grad_outputs=torch.ones_like(out["T"]),
             create_graph=True,
         )[0][:, 2:3]
-        losses["axis_dTdr"] = torch.mean(dT_dr ** 2)
+        losses["axis_dTdr"] = torch.mean((dT_dr / 1000.0) ** 2)
 
         # ∂fv/∂r = 0
         dfv_dr = torch.autograd.grad(
@@ -58,7 +58,7 @@ class BoundaryLoss(nn.Module):
         # ─── 远场 r=r_max ───
         inp, fid = boundary_data["farfield"]
         out = model(inp, fid)
-        losses["far_T"] = torch.mean((out["T"] - self.T_amb) ** 2)
+        losses["far_T"] = torch.mean((out["T"] / 1000.0 - self.T_amb / 1000.0) ** 2)
         losses["far_fv"] = torch.mean(out["fv"] ** 2)
 
         # 汇总

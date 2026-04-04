@@ -32,7 +32,7 @@ class AdaptiveWeights(nn.Module):
         Returns:
             (total_loss, weights_info_dict)
         """
-        total = torch.tensor(0.0, device=self._get_device(losses))
+        total = None
         info = {}
 
         for name in self.loss_names:
@@ -41,13 +41,15 @@ class AdaptiveWeights(nn.Module):
             log_sigma = self.log_sigmas[name]
             sigma_sq = torch.exp(2 * log_sigma)
             weighted = 0.5 / sigma_sq * losses[name] + log_sigma
-            total = total + weighted
+            total = weighted if total is None else total + weighted
             info[name] = {
                 "raw": losses[name].item(),
                 "sigma": torch.exp(log_sigma).item(),
                 "weighted": weighted.item(),
             }
 
+        if total is None:
+            total = torch.tensor(0.0, requires_grad=True)
         return total, info
 
     @staticmethod
@@ -66,16 +68,18 @@ class FixedWeights(nn.Module):
         self.weights = weights
 
     def forward(self, losses: dict) -> tuple:
-        total = torch.tensor(0.0)
+        total = None
         info = {}
         for name, w in self.weights.items():
             if name not in losses:
                 continue
-            device = losses[name].device
-            total = total.to(device) + w * losses[name]
+            term = w * losses[name]
+            total = term if total is None else total + term
             info[name] = {
                 "raw": losses[name].item(),
                 "weight": w,
-                "weighted": (w * losses[name]).item(),
+                "weighted": term.item(),
             }
+        if total is None:
+            total = torch.tensor(0.0, requires_grad=True)
         return total, info
