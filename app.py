@@ -1,9 +1,6 @@
 """RadiationPINN 交互式 Web 应用。
-
-启动：
-    streamlit run app.py
-
-无需命令行知识，所有操作通过网页完成。
+Author: Chenyu He, Zhejiang University, 2026
+E-mail: hechenyu@zju.edu.cn
 """
 import sys
 import os
