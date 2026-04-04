@@ -149,6 +149,10 @@ def inverse_optimize(model, cfg, device, target_qrad, fuel_id,
     z_mm, T, fv, qrad_pred, Y = predict_profiles(
         model, cfg, device, phi_opt, xp_opt, fuel_id, n_z)
 
+    # 恢复模型参数梯度状态
+    for p in model.parameters():
+        p.requires_grad_(True)
+
     return {
         "phi_opt": phi_opt,
         "x_prec_opt": xp_opt,

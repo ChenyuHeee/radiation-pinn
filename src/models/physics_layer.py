@@ -39,8 +39,11 @@ class RTEIntegrationLayer(nn.Module):
         self.register_buffer("kappa_coeff", torch.tensor(coeff))
 
     def compute_kappa(self, fv: torch.Tensor) -> torch.Tensor:
-        """碳烟吸收系数 κ = 6πE(m)/λ · f_v。"""
-        return self.kappa_coeff * fv
+        """碳烟吸收系数 κ = 6πE(m)/λ · f_v。
+
+        注意：模型输出 fv 为 ppm 量级（训练数据如此），需转换为真实体积分数。
+        """
+        return self.kappa_coeff * fv * 1e-6
 
     def compute_source(self, kappa: torch.Tensor,
                        T: torch.Tensor) -> torch.Tensor:
