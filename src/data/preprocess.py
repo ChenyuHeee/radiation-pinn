@@ -266,7 +266,11 @@ def _load_from_csv(data_cfg: dict) -> dict | None:
     sp_csv = data_cfg.get("species_csv", "")
     species = pd.read_csv(sp_csv) if sp_csv and os.path.isfile(sp_csv) else pd.DataFrame()
 
-    return {"temperature": temperature, "radiation": radiation, "soot": soot, "species": species}
+    ext_csv = data_cfg.get("extinction_csv", "")
+    extinction = pd.read_csv(ext_csv) if ext_csv and os.path.isfile(ext_csv) else pd.DataFrame()
+
+    return {"temperature": temperature, "radiation": radiation, "soot": soot,
+            "species": species, "extinction": extinction}
 
 
 def build_training_dataset(cfg: dict) -> dict:
@@ -338,4 +342,5 @@ def build_training_dataset(cfg: dict) -> dict:
         "radiation": radiation,
         "soot": soot,
         "species": pd.DataFrame(),
+        "extinction": pd.DataFrame(),
     }

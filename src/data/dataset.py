@@ -17,6 +17,7 @@ class FlameDataset(Dataset):
                  radiation: pd.DataFrame,
                  soot: pd.DataFrame,
                  species: pd.DataFrame = None,
+                 extinction: pd.DataFrame = None,
                  phi_range=(0.8, 1.4),
                  z_max=0.090):
         super().__init__()
@@ -25,6 +26,7 @@ class FlameDataset(Dataset):
         self._build_radiation_samples(radiation, phi_range, z_max)
         self._build_soot_samples(soot, phi_range, z_max)
         self._build_species_samples(species, phi_range, z_max)
+        self._build_extinction_samples(extinction, phi_range, z_max)
 
     def _build_temperature_samples(self, df, phi_range, z_max):
         if df is None or len(df) == 0:
@@ -47,6 +49,9 @@ class FlameDataset(Dataset):
                 "has_rad": False,
                 "has_species": False,
                 "species_vec": [0.0] * 6,
+                "has_extinction": False,
+                "ext_target": 0.0,
+                "ext_type": -1,
             })
 
     def _build_radiation_samples(self, df, phi_range, z_max):
@@ -70,6 +75,9 @@ class FlameDataset(Dataset):
                 "has_rad": True,
                 "has_species": False,
                 "species_vec": [0.0] * 6,
+                "has_extinction": False,
+                "ext_target": 0.0,
+                "ext_type": -1,
             })
 
     def _build_soot_samples(self, df, phi_range, z_max):
@@ -94,6 +102,9 @@ class FlameDataset(Dataset):
                 "has_rad": False,
                 "has_species": False,
                 "species_vec": [0.0] * 6,
+                "has_extinction": False,
+                "ext_target": 0.0,
+                "ext_type": -1,
             })
 
     # 组分索引映射：SpeciesNet 输出 [CO2, H2O, CO, C2H2/C7H8, O2, N2]
@@ -140,6 +151,50 @@ class FlameDataset(Dataset):
                 "species_mask": sp_mask,
             })
 
+    def _build_extinction_samples(self, df, phi_range, z_max):
+        """消光法原始测量数据。
+
+        tau >= 1 → 无碳烟检出，约束 fv ≈ 0
+        tau < 1  → 有碳烟，-ln(tau) 正比于路径积分 fv
+        """
+        if df is None or len(df) == 0:
+            return
+        for _, row in df.iterrows():
+            phi = row["phi"]
+            phi_norm = (phi - phi_range[0]) / (phi_range[1] - phi_range[0])
+            z_norm = (row["hab_mm"] / 1000.0) / z_max
+            fuel_id = int(row["fuel_id"])
+            x_prec = 1.0 if fuel_id == 1 else 0.0
+
+            tau = row.get("tau", np.nan)
+            neg_ln_tau = row.get("neg_ln_tau", np.nan)
+
+            # 分类：tau >= 1 视为零碳烟，tau < 1 视为有碳烟
+            if pd.isna(tau) or tau >= 1.0:
+                # 无碳烟检出 → fv 应接近 0
+                ext_target = 0.0
+                ext_type = 0  # zero-soot
+            else:
+                # 有碳烟 → -ln(tau) 作为相对约束
+                ext_target = float(neg_ln_tau) if pd.notna(neg_ln_tau) else 0.0
+                ext_type = 1  # has-soot
+
+            self.samples.append({
+                "phi": phi_norm,
+                "z": z_norm,
+                "r": 0.0,
+                "x_prec": x_prec,
+                "fuel_id": fuel_id,
+                "has_T": False,
+                "has_fv": False,
+                "has_rad": False,
+                "has_species": False,
+                "species_vec": [0.0] * 6,
+                "has_extinction": True,
+                "ext_target": ext_target,
+                "ext_type": ext_type,
+            })
+
     def __len__(self):
         return len(self.samples)
 
@@ -168,6 +223,11 @@ class FlameDataset(Dataset):
         targets["species_mask"] = torch.tensor(
             s.get("species_mask", [False] * 6), dtype=torch.bool)
 
+        # 消光法
+        targets["ext_target"] = torch.tensor(s.get("ext_target", 0.0), dtype=torch.float32)
+        targets["ext_type"] = torch.tensor(s.get("ext_type", -1), dtype=torch.long)
+        mask["extinction"] = s.get("has_extinction", False)
+
         return inputs, fuel_id, targets, mask
 
 
@@ -185,6 +245,10 @@ def collate_flame(batch):
     targets["species"] = torch.stack([b[2]["species"] for b in batch])
     targets["species_mask"] = torch.stack([b[2]["species_mask"] for b in batch])
     masks["species"] = torch.tensor([b[3]["species"] for b in batch], dtype=torch.bool)
+
+    targets["ext_target"] = torch.stack([b[2]["ext_target"] for b in batch])
+    targets["ext_type"] = torch.stack([b[2]["ext_type"] for b in batch])
+    masks["extinction"] = torch.tensor([b[3]["extinction"] for b in batch], dtype=torch.bool)
 
     return inputs, fuel_ids, targets, masks
 

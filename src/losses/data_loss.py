@@ -10,6 +10,14 @@ class DataLoss(nn.Module):
         super().__init__()
         self.mse = nn.MSELoss(reduction="mean")
 
+    @staticmethod
+    def _safe_mse(pred, target):
+        """NaN-safe MSE: 跳过含 NaN 的样本(初始化阶段可能出现)。"""
+        valid = torch.isfinite(pred) & torch.isfinite(target)
+        if not valid.any():
+            return torch.tensor(0.0, device=pred.device)
+        return torch.nn.functional.mse_loss(pred[valid], target[valid])
+
     def forward(self, predictions: dict, targets: dict,
                 masks: dict) -> dict:
         """计算有标注样本的 MSE 损失。
@@ -29,21 +37,21 @@ class DataLoss(nn.Module):
             m = masks["T_K"]
             T_pred = predictions["T"][m].squeeze(-1)
             T_true = targets["T_K"][m]
-            losses["T"] = self.mse(T_pred, T_true)
+            losses["T"] = self._safe_mse(T_pred, T_true)
 
         # 碳烟
         if masks["fv"].any():
             m = masks["fv"]
             fv_pred = predictions["fv"][m].squeeze(-1)
             fv_true = targets["fv"][m]
-            losses["fv"] = self.mse(fv_pred, fv_true)
+            losses["fv"] = self._safe_mse(fv_pred, fv_true)
 
         # 辐射 (q_rad 仅在 compute_radiation() 后可用)
         if "q_rad" in predictions and masks["q_rad"].any():
             m = masks["q_rad"]
             q_pred = predictions["q_rad"][m]
             q_true = targets["q_rad"][m]
-            losses["rad"] = self.mse(q_pred, q_true)
+            losses["rad"] = self._safe_mse(q_pred, q_true)
 
         # 组分 (只比较有标注的组分通道)
         if masks.get("species") is not None and masks["species"].any():
@@ -52,6 +60,29 @@ class DataLoss(nn.Module):
             Y_true = targets["species"][m]  # (N, K)
             sp_mask = targets["species_mask"][m]  # (N, K) 每个组分是否有值
             if sp_mask.any():
-                losses["species"] = self.mse(Y_pred[sp_mask], Y_true[sp_mask])
+                losses["species"] = self._safe_mse(Y_pred[sp_mask], Y_true[sp_mask])
+
+        # 消光法：tau>=1 → fv 应为 0; tau<1 → -ln(tau) 提供相对碳烟约束
+        if masks.get("extinction") is not None and masks["extinction"].any():
+            m = masks["extinction"]
+            fv_pred = predictions["fv"][m].squeeze(-1)  # (N,)
+            ext_target = targets["ext_target"][m]         # (N,)
+            ext_type = targets["ext_type"][m]             # (N,) 0=zero-soot, 1=has-soot
+
+            # type 0: 未检测到碳烟 → fv 应为 0
+            m0 = ext_type == 0
+            if m0.any():
+                losses["ext_zero"] = self._safe_mse(
+                    fv_pred[m0], torch.zeros_like(fv_pred[m0]))
+
+            # type 1: 检测到碳烟 → -ln(tau) 与 fv 成正比，
+            # 用归一化排序损失：fv/max(fv) ≈ -ln(tau)/max(-ln(tau))
+            m1 = ext_type == 1
+            if m1.any() and m1.sum() > 1:
+                nlnt = ext_target[m1]
+                fv1 = fv_pred[m1]
+                nlnt_n = nlnt / (nlnt.max() + 1e-8)
+                fv1_n = fv1 / (fv1.max().detach() + 1e-8)
+                losses["ext_rank"] = self._safe_mse(fv1_n, nlnt_n)
 
         return losses
