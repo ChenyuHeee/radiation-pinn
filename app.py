@@ -322,39 +322,39 @@ def main():
             fuel_id = st.selectbox("燃料类型", [0, 1, 2],
                                     format_func=lambda x: FUEL_NAMES[x])
 
-        if st.button("🚀 开始预测", key="predict_btn"):
-            with st.spinner("计算中..."):
-                z_mm, T, fv, qrad, Y = predict_profiles(
-                    model, cfg, device, phi, x_prec, fuel_id)
+        # 自动预测（参数变化即刷新）
+        with st.spinner("计算中..."):
+            z_mm, T, fv, qrad, Y = predict_profiles(
+                model, cfg, device, phi, x_prec, fuel_id)
 
-            species_names = ["CO₂", "H₂O", "CO", "C₂H₂/C₇H₈", "O₂", "N₂"]
-            fig = plot_forward_results(z_mm, T, fv, qrad, Y, species_names)
-            st.pyplot(fig)
-            plt.close(fig)
+        species_names = ["CO₂", "H₂O", "CO", "C₂H₂/C₇H₈", "O₂", "N₂"]
+        fig = plot_forward_results(z_mm, T, fv, qrad, Y, species_names)
+        st.pyplot(fig)
+        plt.close(fig)
 
-            # 关键指标卡片
-            col1, col2, col3, col4 = st.columns(4)
-            col1.metric("🌡️ 峰值温度", f"{T.max():.0f} K",
-                        f"位置 {z_mm[T.argmax()]:.0f} mm")
-            col2.metric("💨 峰值碳烟", f"{fv.max():.2e}",
-                        f"位置 {z_mm[fv.argmax()]:.0f} mm")
-            col3.metric("☀️ 峰值辐射", f"{qrad.max():.0f} W/m²",
-                        f"位置 {z_mm[qrad.argmax()]:.0f} mm")
-            col4.metric("📊 平均辐射", f"{qrad.mean():.0f} W/m²")
+        # 关键指标卡片
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("🌡️ 峰值温度", f"{T.max():.0f} K",
+                    f"位置 {z_mm[T.argmax()]:.0f} mm")
+        col2.metric("💨 峰值碳烟", f"{fv.max():.2e}",
+                    f"位置 {z_mm[fv.argmax()]:.0f} mm")
+        col3.metric("☀️ 峰值辐射", f"{qrad.max():.0f} W/m²",
+                    f"位置 {z_mm[qrad.argmax()]:.0f} mm")
+        col4.metric("📊 平均辐射", f"{qrad.mean():.0f} W/m²")
 
-            # 数据表格
-            with st.expander("📋 查看详细数据"):
-                df = pd.DataFrame({
-                    "HAB (mm)": z_mm.round(1),
-                    "T (K)": T.round(1),
-                    "fv": fv,
-                    "q_rad (W/m²)": qrad.round(2),
-                })
-                st.dataframe(df, use_container_width=True)
+        # 数据表格
+        with st.expander("📋 查看详细数据"):
+            df = pd.DataFrame({
+                "HAB (mm)": z_mm.round(1),
+                "T (K)": T.round(1),
+                "fv": fv,
+                "q_rad (W/m²)": qrad.round(2),
+            })
+            st.dataframe(df, use_container_width=True)
 
-                csv = df.to_csv(index=False).encode("utf-8")
-                st.download_button("💾 下载数据 CSV", csv,
-                                   "prediction.csv", "text/csv")
+            csv = df.to_csv(index=False).encode("utf-8")
+            st.download_button("💾 下载数据 CSV", csv,
+                               "prediction.csv", "text/csv")
 
     # ======================== Tab 2: 逆向设计 ========================
     with tab2:
@@ -437,18 +437,18 @@ def main():
                                  format_func=lambda x: FUEL_NAMES[x],
                                  key="map_fuel")
 
-        if st.button("🗺️ 生成编程地图", key="map_btn"):
-            with st.spinner("扫描参数空间..."):
-                fig = plot_programming_map(model, cfg, device, map_fuel)
-            st.pyplot(fig)
-            plt.close(fig)
-            st.markdown("""
-            **如何阅读此图：**
-            - **横轴**：碳烟前驱体掺混比 x_prec（0 = 纯燃料，1 = 最大掺混）
-            - **纵轴**：当量比 φ（0.8~1.4）
-            - **颜色**：辐射热通量大小
-            - 颜色越亮 → 辐射越强 → 碳烟越多
-            """)
+        # 自动生成编程地图
+        with st.spinner("扫描参数空间..."):
+            fig = plot_programming_map(model, cfg, device, map_fuel)
+        st.pyplot(fig)
+        plt.close(fig)
+        st.markdown("""
+        **如何阅读此图：**
+        - **横轴**：碳烟前驱体掺混比 x_prec（0 = 纯燃料，1 = 最大掺混）
+        - **纵轴**：当量比 φ（0.8~1.4）
+        - **颜色**：辐射热通量大小
+        - 颜色越亮 → 辐射越强 → 碳烟越多
+        """)
 
 
 if __name__ == "__main__":
