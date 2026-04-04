@@ -54,6 +54,7 @@ def main():
     print(f"  温度样本: {len(data['temperature'])} 条")
     print(f"  辐射样本: {len(data['radiation'])} 条")
     print(f"  碳烟样本: {len(data['soot'])} 条")
+    print(f"  组分样本: {len(data['species'])} 条")
 
     # ─── 2. 构建数据集 ───
     print("\n[Step 2] 构建 FlameDataset...")
@@ -61,6 +62,7 @@ def main():
         temperature=data["temperature"],
         radiation=data["radiation"],
         soot=data["soot"],
+        species=data["species"],
     )
     print(f"  总样本数: {len(dataset)}")
 

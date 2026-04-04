@@ -32,3 +32,5 @@ hh/
 
 # Jupyter
 .ipynb_checkpoints/
+_test_*.py
+_extract_*.py

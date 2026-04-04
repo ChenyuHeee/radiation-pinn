@@ -38,11 +38,20 @@ class DataLoss(nn.Module):
             fv_true = targets["fv"][m]
             losses["fv"] = self.mse(fv_pred, fv_true)
 
-        # 辐射
-        if masks["q_rad"].any():
+        # 辐射 (q_rad 仅在 compute_radiation() 后可用)
+        if "q_rad" in predictions and masks["q_rad"].any():
             m = masks["q_rad"]
             q_pred = predictions["q_rad"][m]
             q_true = targets["q_rad"][m]
             losses["rad"] = self.mse(q_pred, q_true)
+
+        # 组分 (只比较有标注的组分通道)
+        if masks.get("species") is not None and masks["species"].any():
+            m = masks["species"]  # (B,) 有组分标注的样本
+            Y_pred = predictions["Y"][m]  # (N, K)
+            Y_true = targets["species"][m]  # (N, K)
+            sp_mask = targets["species_mask"][m]  # (N, K) 每个组分是否有值
+            if sp_mask.any():
+                losses["species"] = self.mse(Y_pred[sp_mask], Y_true[sp_mask])
 
         return losses

@@ -37,6 +37,7 @@ data:
   temperature_csv: "data/temperature.csv"
   radiation_csv: "data/radiation.csv"
   soot_csv: "data/soot.csv"
+  species_csv: "data/species.csv"
 
   # 原始数据路径（仅在重新预处理时使用，仓库外）
   root: "hh"

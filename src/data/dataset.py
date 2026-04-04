@@ -16,6 +16,7 @@ class FlameDataset(Dataset):
     def __init__(self, temperature: pd.DataFrame,
                  radiation: pd.DataFrame,
                  soot: pd.DataFrame,
+                 species: pd.DataFrame = None,
                  phi_range=(0.8, 1.4),
                  z_max=0.090):
         super().__init__()
@@ -23,6 +24,7 @@ class FlameDataset(Dataset):
         self._build_temperature_samples(temperature, phi_range, z_max)
         self._build_radiation_samples(radiation, phi_range, z_max)
         self._build_soot_samples(soot, phi_range, z_max)
+        self._build_species_samples(species, phi_range, z_max)
 
     def _build_temperature_samples(self, df, phi_range, z_max):
         if df is None or len(df) == 0:
@@ -43,6 +45,8 @@ class FlameDataset(Dataset):
                 "has_T": True,
                 "has_fv": False,
                 "has_rad": False,
+                "has_species": False,
+                "species_vec": [0.0] * 6,
             })
 
     def _build_radiation_samples(self, df, phi_range, z_max):
@@ -64,6 +68,8 @@ class FlameDataset(Dataset):
                 "has_T": False,
                 "has_fv": False,
                 "has_rad": True,
+                "has_species": False,
+                "species_vec": [0.0] * 6,
             })
 
     def _build_soot_samples(self, df, phi_range, z_max):
@@ -86,6 +92,52 @@ class FlameDataset(Dataset):
                 "has_T": False,
                 "has_fv": True,
                 "has_rad": False,
+                "has_species": False,
+                "species_vec": [0.0] * 6,
+            })
+
+    # 组分索引映射：SpeciesNet 输出 [CO2, H2O, CO, C2H2/C7H8, O2, N2]
+    SPECIES_COL_TO_IDX = {"CO2": 0, "H2O": 1, "CO": 2, "O2": 4}
+
+    def _build_species_samples(self, df, phi_range, z_max):
+        if df is None or len(df) == 0:
+            return
+        for _, row in df.iterrows():
+            eq = row["equiv_ratio"]
+            # 当量比 = 1/过量空气系数，映射到 phi (=过量空气系数)
+            # 数据中 equiv_ratio 即当量比，对应的 phi = 1/equiv_ratio
+            phi = 1.0 / eq if eq > 0 else 1.0
+            phi_norm = (phi - phi_range[0]) / (phi_range[1] - phi_range[0])
+            z_norm = (row["hab_mm"] / 1000.0) / z_max
+            # 这些是甲醇燃料数据，fuel_id=2 (甲醇)
+            fuel_id = 2
+            x_prec = 0.0
+
+            # 构建 6 维目标向量和掩码 (只有有效组分计入损失)
+            sp_vec = [0.0] * 6
+            sp_mask = [False] * 6
+            for col, idx in self.SPECIES_COL_TO_IDX.items():
+                val = row.get(col, np.nan)
+                if pd.notna(val):
+                    # 数据单位是百分比体积，需要除以 100 转换为小数
+                    sp_vec[idx] = float(val) / 100.0
+                    sp_mask[idx] = True
+
+            if not any(sp_mask):
+                continue
+
+            self.samples.append({
+                "phi": phi_norm,
+                "z": z_norm,
+                "r": 0.0,
+                "x_prec": x_prec,
+                "fuel_id": fuel_id,
+                "has_T": False,
+                "has_fv": False,
+                "has_rad": False,
+                "has_species": True,
+                "species_vec": sp_vec,
+                "species_mask": sp_mask,
             })
 
     def __len__(self):
@@ -110,6 +162,12 @@ class FlameDataset(Dataset):
                 targets[key] = torch.tensor(0.0, dtype=torch.float32)
                 mask[key] = False
 
+        # 组分
+        targets["species"] = torch.tensor(s.get("species_vec", [0.0] * 6), dtype=torch.float32)
+        mask["species"] = s.get("has_species", False)
+        targets["species_mask"] = torch.tensor(
+            s.get("species_mask", [False] * 6), dtype=torch.bool)
+
         return inputs, fuel_id, targets, mask
 
 
@@ -123,6 +181,10 @@ def collate_flame(batch):
     for key in ("T_K", "fv", "q_rad"):
         targets[key] = torch.stack([b[2][key] for b in batch])
         masks[key] = torch.tensor([b[3][key] for b in batch], dtype=torch.bool)
+
+    targets["species"] = torch.stack([b[2]["species"] for b in batch])
+    targets["species_mask"] = torch.stack([b[2]["species_mask"] for b in batch])
+    masks["species"] = torch.tensor([b[3]["species"] for b in batch], dtype=torch.bool)
 
     return inputs, fuel_ids, targets, masks
 
