@@ -1,0 +1,34 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environment
+venv/
+.venv/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# Training outputs
+checkpoints/
+results/
+logs/
+runs/
+wandb/
+
+# Raw data (not tracked)
+hh/
+
+# Jupyter
+.ipynb_checkpoints/
