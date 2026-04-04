@@ -29,6 +29,7 @@ wandb/
 
 # Raw data (not tracked)
 hh/
+data/
 
 # Jupyter
 .ipynb_checkpoints/
