@@ -55,7 +55,7 @@ intelligenergy/
 ### 1. 安装依赖
 
 ```bash
-pip install torch numpy pandas openpyxl pyyaml matplotlib tqdm
+pip install -r requirements.txt
 ```
 
 ### 2. 训练模型
@@ -78,17 +78,35 @@ python scripts/train.py
 - 每 1000 epoch 保存 checkpoint 到 `checkpoints/`
 - 训练结束后生成可视化图表到 `results/`
 
-### 3. 用训练好的模型做预测
+### 3. 🌐 启动交互式 Web 应用（推荐）
+
+训练完成后，一键启动可视化交互平台：
 
 ```bash
-# 预测参考火焰 φ=1.0 的轴向温度分布
-python scripts/predict.py --checkpoint checkpoints/radiation_pinn_final.pt --phi 1.0 --fuel 0
-
-# 预测甲苯火焰 φ=1.2，掺混比 0.5
-python scripts/predict.py --checkpoint checkpoints/radiation_pinn_final.pt --phi 1.2 --fuel 1 --x_prec 0.5
+streamlit run app.py
 ```
 
-### 4. 自定义配置
+浏览器自动打开，包含三大功能页面：
+
+| 页面 | 功能 | 说明 |
+|------|------|------|
+| **🔬 正向预测** | 参数 → 火焰场 → 辐射 | 拖动滑条调节当量比、掺混比，实时查看温度/碳烟/辐射/组分分布 |
+| **🎯 逆向设计** | 目标辐射 → 最优配方 | 输入想要的辐射热通量，模型自动搜索最优的当量比和掺混比 |
+| **🗺️ 编程地图** | 参数空间全局视图 | 展示 q_rad 如何随 (φ, x_prec) 变化的等值线图 |
+
+> 不会用命令行？也可以用 `bash start.sh` 一键启动。
+
+### 4. 命令行预测（可选）
+
+```bash
+# 正向预测
+python scripts/predict.py --checkpoint checkpoints/radiation_pinn_final.pt --phi 1.0 --fuel 0
+
+# 逆向设计：搜索使辐射 = 5000 W/m² 的最优参数
+python scripts/inverse.py --checkpoint checkpoints/radiation_pinn_final.pt --target_qrad 5000
+```
+
+### 5. 自定义配置
 
 编辑 `src/configs/default.yaml` 修改：
 
@@ -159,6 +177,24 @@ results/
   ├── radiation_programming.png   # 辐射编程曲线（核心！掺混比 vs 辐射通量）
   └── training_history.png        # 训练损失曲线
 ```
+
+## 展示方式
+
+### 给不会技术的人使用
+
+1. 训练完成后，把整个 `radiation-pinn/` 文件夹发给对方
+2. 对方只需安装 Python，然后执行：
+   ```bash
+   pip install -r requirements.txt
+   streamlit run app.py
+   ```
+3. 浏览器自动打开交互界面，通过拖动滑条和点击按钮即可操作
+
+### Web 应用截图功能
+
+- **正向预测**：调参数 → 看四张图（温度/碳烟/辐射/组分） → 下载数据 CSV
+- **逆向设计**：设目标辐射 → 自动优化 → 看结果对比图 → 下载结果
+- **编程地图**：一键生成辐射编程等值线图
 
 ## 常见问题
 
