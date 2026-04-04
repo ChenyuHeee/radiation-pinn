@@ -21,11 +21,13 @@ env/
 .DS_Store
 
 # Training outputs
-# checkpoints/  # ← 现在需要跟踪已训练模型
+# checkpoints/  # ← 只跟踪 final.pt
+checkpoints/radiation_pinn_epoch*.pt
 results/
 logs/
 runs/
 wandb/
+*.log
 
 # Raw data (not tracked)
 hh/
@@ -33,10 +35,6 @@ data/
 
 # Jupyter
 .ipynb_checkpoints/
-_test_*.py
-_extract_*.py
-_debug_*.py
-_quick_test.py
-_medium_test.py
-_full_train.py
-_verify_model.py
+
+# Temp/debug scripts
+_*.py
