@@ -21,8 +21,13 @@ from src.models.pinn import RadiationPINN
 from src.training.trainer import get_device
 
 # ─── 中文字体 ───
-plt.rcParams["font.sans-serif"] = ["SimHei", "Arial Unicode MS",
-                                    "PingFang SC", "DejaVu Sans"]
+import matplotlib.font_manager as fm
+# 优先使用 Noto Sans CJK（Streamlit Cloud apt 安装），其次 macOS 字体
+_cjk_fonts = ["Noto Sans CJK SC", "PingFang SC", "SimHei",
+              "Arial Unicode MS", "DejaVu Sans"]
+# 刷新字体缓存以识别新安装的字体
+fm._load_fontmanager(try_read_cache=False)
+plt.rcParams["font.sans-serif"] = _cjk_fonts
 plt.rcParams["axes.unicode_minus"] = False
 
 # ======================== 页面配置 ========================
