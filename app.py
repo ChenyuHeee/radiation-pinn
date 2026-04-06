@@ -462,8 +462,7 @@ def main():
 
     # ======================== Tab 4: 模型验证 ========================
     with tab4:
-        st.header("模型验证：预测 vs 实验")
-        st.markdown("用训练数据评估模型拟合质量。展示逐点对比、分条件剖面、误差统计。")
+        st.header("模型拟合与验证")
 
         # 加载实验数据
         data_dir = os.path.join(_BASE_DIR, "data")
@@ -474,6 +473,10 @@ def main():
         if not os.path.exists(temp_path):
             st.warning("未找到 data/ 目录下的实验数据 CSV，无法进行验证。")
         else:
+            # 训练时的验证当量比
+            VAL_PHI = cfg["training"].get("val_phi", 1.1)
+            PHI_TOL = 0.01
+
             df_temp = pd.read_csv(temp_path)
             df_rad = pd.read_csv(rad_path) if os.path.exists(rad_path) else None
             df_soot = pd.read_csv(soot_path) if os.path.exists(soot_path) else None
@@ -481,12 +484,28 @@ def main():
             z_max = cfg["physics"]["z_max"]
             phi_lo, phi_hi = PHI_RANGE
 
+            # ---- 辅助函数 ----
+            def _compute_metrics(y_true, y_pred):
+                """返回 RMSE, R², MAPE"""
+                rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+                ss_res = np.sum((y_true - y_pred) ** 2)
+                ss_tot = np.sum((y_true - y_true.mean()) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+                mask = np.abs(y_true) > 1e-6
+                mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100 if mask.any() else float("nan")
+                return rmse, r2, mape
+
+            def _is_val(phi_arr):
+                """判断哪些样本属于验证集 (φ ≈ VAL_PHI)"""
+                return np.abs(phi_arr - VAL_PHI) < PHI_TOL
+
             # ---------- 温度预测 ----------
             phi_norms_t = ((df_temp["phi"] - phi_lo) / (phi_hi - phi_lo)).values
             z_norms_t = (df_temp["hab_mm"].values / 1000.0) / z_max
             fuel_ids_t = df_temp["fuel_id"].values.astype(int)
             x_prec_t = np.where(fuel_ids_t == 1, 1.0, 0.0)
             T_exp = df_temp["T_K"].values
+            T_is_val = _is_val(df_temp["phi"].values)
 
             inp_t = torch.zeros(len(df_temp), 4)
             inp_t[:, 0] = torch.tensor(phi_norms_t, dtype=torch.float32)
@@ -500,13 +519,14 @@ def main():
             T_pred = out_t["T"].squeeze().cpu().numpy()
 
             # ---------- 辐射预测 ----------
-            q_exp, q_pred = None, None
+            q_exp, q_pred, q_is_val = None, None, None
             if df_rad is not None and len(df_rad) > 0:
                 phi_norms_r = ((df_rad["phi"] - phi_lo) / (phi_hi - phi_lo)).values
                 z_norms_r = np.minimum((df_rad["hab_index"].values + 1) * 5.0 / 1000.0 / z_max, 1.0)
                 fuel_ids_r = df_rad["fuel_id"].values.astype(int)
                 x_prec_r = np.where(fuel_ids_r == 1, 1.0, 0.0)
                 q_exp = df_rad["q_rad_Wm2"].values
+                q_is_val = _is_val(df_rad["phi"].values)
 
                 qp_list = []
                 for k in range(len(df_rad)):
@@ -518,7 +538,7 @@ def main():
                 q_pred = np.array(qp_list)
 
             # ---------- 碳烟预测 ----------
-            fv_exp, fv_pred = None, None
+            fv_exp, fv_pred, fv_is_val = None, None, None
             if df_soot is not None and len(df_soot) > 0:
                 from src.data.preprocess import FUEL_NAME_TO_ID
                 df_sv = df_soot.dropna(subset=["hab_mm"]).copy()
@@ -528,6 +548,7 @@ def main():
                     sv_z = (df_sv["hab_mm"].values / 1000.0) / z_max
                     sv_xp = np.where(sv_fuel == 1, 1.0, 0.0)
                     fv_exp = df_sv["fv_mean"].values
+                    fv_is_val = _is_val(df_sv["phi"].values)
 
                     inp_s = torch.zeros(len(df_sv), 4)
                     inp_s[:, 0] = torch.tensor(sv_phi, dtype=torch.float32)
@@ -538,40 +559,71 @@ def main():
                         out_s = model(inp_s.to(device), fid_s.to(device))
                     fv_pred = out_s["fv"].squeeze().cpu().numpy()
 
+            # ---- 汇总各数据的 train/val 分割情况 ----
+            n_val_T = int(T_is_val.sum())
+            n_val_q = int(q_is_val.sum()) if q_is_val is not None else 0
+            n_val_fv = int(fv_is_val.sum()) if fv_is_val is not None else 0
+            has_val = (n_val_T + n_val_q + n_val_fv) > 0
+
+            # ---- 说明信息 ----
+            st.info(f"""
+**数据划分说明** — 训练时以 φ = {VAL_PHI} 的数据作为验证集（未参与训练），其余为训练集。
+
+| 数据类型 | 训练集样本 | 验证集样本 (φ={VAL_PHI}) |
+|---------|-----------|------------------------|
+| 温度 T | {len(T_exp) - n_val_T} | {n_val_T} {'⚠️ 无此 φ' if n_val_T == 0 else ''} |
+| 辐射 q_rad | {len(q_exp) - n_val_q if q_exp is not None else '—'} | {n_val_q if q_exp is not None else '—'} |
+| 碳烟 fv | {len(fv_exp) - n_val_fv if fv_exp is not None else '—'} | {n_val_fv if fv_exp is not None else '—'} |
+
+训练集指标反映**拟合能力**，验证集指标反映**泛化能力**（模型未见过这些数据）。
+""")
+
             # ==================== 可视化 ====================
-            # --- 1. Parity Plots ---
+            # --- 1. Parity Plots (训练集/验证集分色) ---
             st.subheader("1 · 预测值 vs 实测值 (Parity Plot)")
             n_parity = 1 + (1 if q_exp is not None else 0) + (1 if fv_exp is not None else 0)
             fig_p, axes_p = plt.subplots(1, n_parity, figsize=(5 * n_parity, 5))
             if n_parity == 1:
                 axes_p = [axes_p]
 
-            def _parity(ax, y_true, y_pred, label, unit, color):
-                ax.scatter(y_true, y_pred, s=10, alpha=0.6, c=color, edgecolors="none")
+            def _parity(ax, y_true, y_pred, is_val_mask, label, unit, color_train, color_val):
+                mask_tr = ~is_val_mask
+                mask_vl = is_val_mask
+                # 训练集
+                if mask_tr.any():
+                    ax.scatter(y_true[mask_tr], y_pred[mask_tr], s=10, alpha=0.5,
+                               c=color_train, edgecolors="none", label="训练集")
+                # 验证集
+                if mask_vl.any():
+                    ax.scatter(y_true[mask_vl], y_pred[mask_vl], s=30, alpha=0.9,
+                               c=color_val, edgecolors="k", linewidths=0.5,
+                               marker="D", label=f"验证集 (φ={VAL_PHI})")
                 lo = min(y_true.min(), y_pred.min())
                 hi = max(y_true.max(), y_pred.max())
                 margin = (hi - lo) * 0.05
                 ax.plot([lo - margin, hi + margin], [lo - margin, hi + margin],
                         "k--", linewidth=1, label="理想线 y=x")
-                ss_res = np.sum((y_true - y_pred) ** 2)
-                ss_tot = np.sum((y_true - y_true.mean()) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-                rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+                # 训练集指标
+                rmse_tr, r2_tr, _ = _compute_metrics(y_true[mask_tr], y_pred[mask_tr]) if mask_tr.any() else (0, 0, 0)
+                title = f"{label}\n训练 R²={r2_tr:.4f}  RMSE={rmse_tr:.1f}"
+                if mask_vl.any():
+                    rmse_vl, r2_vl, _ = _compute_metrics(y_true[mask_vl], y_pred[mask_vl])
+                    title += f"\n验证 R²={r2_vl:.4f}  RMSE={rmse_vl:.1f}"
                 ax.set_xlabel(f"实测 {label} ({unit})")
                 ax.set_ylabel(f"预测 {label} ({unit})")
-                ax.set_title(f"{label}\nR²={r2:.4f}  RMSE={rmse:.1f}")
-                ax.legend(fontsize=8)
+                ax.set_title(title, fontsize=9)
+                ax.legend(fontsize=7)
                 ax.set_aspect("equal", adjustable="box")
                 ax.grid(True, alpha=0.3)
 
             idx = 0
-            _parity(axes_p[idx], T_exp, T_pred, "温度 T", "K", "#e74c3c")
+            _parity(axes_p[idx], T_exp, T_pred, T_is_val, "温度 T", "K", "#e74c3c", "#ff7979")
             idx += 1
             if q_exp is not None:
-                _parity(axes_p[idx], q_exp, q_pred, "辐射 q_rad", "W/m²", "#3498db")
+                _parity(axes_p[idx], q_exp, q_pred, q_is_val, "辐射 q_rad", "W/m²", "#3498db", "#74b9ff")
                 idx += 1
             if fv_exp is not None:
-                _parity(axes_p[idx], fv_exp, fv_pred, "碳烟 fv", "ppm", "#2c3e50")
+                _parity(axes_p[idx], fv_exp, fv_pred, fv_is_val, "碳烟 fv", "ppm", "#2c3e50", "#636e72")
 
             plt.tight_layout()
             st.pyplot(fig_p)
@@ -595,6 +647,7 @@ def main():
                     sub = df_tf[df_tf["phi"] == phi_val].sort_values("hab_mm")
                     hab_exp = sub["hab_mm"].values
                     t_exp_sub = sub["T_K"].values
+                    is_val_phi = abs(phi_val - VAL_PHI) < PHI_TOL
                     # 模型预测曲线
                     z_dense = np.linspace(hab_exp.min(), hab_exp.max(), 60)
                     phi_n = (phi_val - phi_lo) / (phi_hi - phi_lo)
@@ -607,8 +660,11 @@ def main():
                     with torch.no_grad():
                         t_dense = model(inp_d.to(device), fid_d.to(device))["T"].squeeze().cpu().numpy()
                     ax.plot(z_dense, t_dense, "r-", linewidth=1.5, label="PINN 预测")
-                    ax.scatter(hab_exp, t_exp_sub, c="k", s=20, zorder=5, label="实验")
-                    ax.set_title(f"φ = {phi_val}")
+                    sc_color = "#ff7979" if is_val_phi else "k"
+                    sc_label = "实验 (验证集)" if is_val_phi else "实验 (训练集)"
+                    ax.scatter(hab_exp, t_exp_sub, c=sc_color, s=20, zorder=5, label=sc_label)
+                    title_suffix = " [验证]" if is_val_phi else " [训练]"
+                    ax.set_title(f"φ = {phi_val}{title_suffix}")
                     ax.set_xlabel("HAB (mm)")
                     ax.set_ylabel("T (K)")
                     ax.legend(fontsize=7)
@@ -619,25 +675,35 @@ def main():
                 st.pyplot(fig_t)
                 plt.close(fig_t)
 
-            # --- 3. 误差统计表 ---
+            # --- 3. 误差统计表 (训练 / 验证分开) ---
             st.subheader("3 · 误差统计汇总")
+
+            def _stats_row(name, y_true, y_pred, split_label):
+                rmse, r2, mape = _compute_metrics(y_true, y_pred)
+                return {"指标": name, "数据集": split_label, "样本数": len(y_true),
+                        "RMSE": f"{rmse:.2f}", "R²": f"{r2:.4f}", "MAPE (%)": f"{mape:.1f}"}
+
             stats = []
-
-            def _stats(name, y_true, y_pred):
-                rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
-                ss_res = np.sum((y_true - y_pred) ** 2)
-                ss_tot = np.sum((y_true - y_true.mean()) ** 2)
-                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
-                mask = np.abs(y_true) > 1e-6
-                mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100 if mask.any() else float("nan")
-                return {"指标": name, "样本数": len(y_true), "RMSE": f"{rmse:.2f}",
-                        "R²": f"{r2:.4f}", "MAPE (%)": f"{mape:.1f}"}
-
-            stats.append(_stats("温度 T (K)", T_exp, T_pred))
+            # 温度
+            mask_tr_T = ~T_is_val
+            if mask_tr_T.any():
+                stats.append(_stats_row("温度 T (K)", T_exp[mask_tr_T], T_pred[mask_tr_T], "训练"))
+            if T_is_val.any():
+                stats.append(_stats_row("温度 T (K)", T_exp[T_is_val], T_pred[T_is_val], "验证"))
+            # 辐射
             if q_exp is not None:
-                stats.append(_stats("辐射 q_rad (W/m²)", q_exp, q_pred))
+                mask_tr_q = ~q_is_val
+                if mask_tr_q.any():
+                    stats.append(_stats_row("辐射 q_rad (W/m²)", q_exp[mask_tr_q], q_pred[mask_tr_q], "训练"))
+                if q_is_val.any():
+                    stats.append(_stats_row("辐射 q_rad (W/m²)", q_exp[q_is_val], q_pred[q_is_val], "验证"))
+            # 碳烟
             if fv_exp is not None:
-                stats.append(_stats("碳烟 fv (ppm)", fv_exp, fv_pred))
+                mask_tr_fv = ~fv_is_val
+                if mask_tr_fv.any():
+                    stats.append(_stats_row("碳烟 fv (ppm)", fv_exp[mask_tr_fv], fv_pred[mask_tr_fv], "训练"))
+                if fv_is_val.any():
+                    stats.append(_stats_row("碳烟 fv (ppm)", fv_exp[fv_is_val], fv_pred[fv_is_val], "验证"))
 
             st.table(pd.DataFrame(stats))
 
@@ -647,44 +713,41 @@ def main():
             if n_parity == 1:
                 axes_h = [axes_h]
 
+            def _residual_hist(ax, y_true, y_pred, is_val_mask, label, unit, color_tr, color_vl):
+                mask_tr = ~is_val_mask
+                res_all = y_pred - y_true
+                if mask_tr.any():
+                    res_tr = res_all[mask_tr]
+                    ax.hist(res_tr, bins=30, color=color_tr, alpha=0.7, edgecolor="white", label="训练集")
+                if is_val_mask.any():
+                    res_vl = res_all[is_val_mask]
+                    ax.hist(res_vl, bins=15, color=color_vl, alpha=0.8, edgecolor="white", label="验证集")
+                ax.axvline(0, color="k", linestyle="--")
+                ax.set_xlabel(f"{label}残差 ({unit})")
+                ax.set_ylabel("计数")
+                ax.set_title(f"{label}残差  均值={res_all.mean():.1f}  标准差={res_all.std():.1f}")
+                ax.legend(fontsize=7)
+
             idx = 0
-            res_T = T_pred - T_exp
-            axes_h[idx].hist(res_T, bins=30, color="#e74c3c", alpha=0.7, edgecolor="white")
-            axes_h[idx].axvline(0, color="k", linestyle="--")
-            axes_h[idx].set_xlabel("温度残差 (K)")
-            axes_h[idx].set_ylabel("计数")
-            axes_h[idx].set_title(f"温度残差  均值={res_T.mean():.1f}  标准差={res_T.std():.1f}")
+            _residual_hist(axes_h[idx], T_exp, T_pred, T_is_val, "温度", "K", "#e74c3c", "#ff7979")
             idx += 1
-
             if q_exp is not None:
-                res_q = q_pred - q_exp
-                axes_h[idx].hist(res_q, bins=20, color="#3498db", alpha=0.7, edgecolor="white")
-                axes_h[idx].axvline(0, color="k", linestyle="--")
-                axes_h[idx].set_xlabel("辐射残差 (W/m²)")
-                axes_h[idx].set_ylabel("计数")
-                axes_h[idx].set_title(f"辐射残差  均值={res_q.mean():.1f}  标准差={res_q.std():.1f}")
+                _residual_hist(axes_h[idx], q_exp, q_pred, q_is_val, "辐射", "W/m²", "#3498db", "#74b9ff")
                 idx += 1
-
             if fv_exp is not None:
-                res_fv = fv_pred - fv_exp
-                axes_h[idx].hist(res_fv, bins=20, color="#2c3e50", alpha=0.7, edgecolor="white")
-                axes_h[idx].axvline(0, color="k", linestyle="--")
-                axes_h[idx].set_xlabel("碳烟残差 (ppm)")
-                axes_h[idx].set_ylabel("计数")
-                axes_h[idx].set_title(f"碳烟残差  均值={res_fv.mean():.2f}  标准差={res_fv.std():.2f}")
+                _residual_hist(axes_h[idx], fv_exp, fv_pred, fv_is_val, "碳烟", "ppm", "#2c3e50", "#636e72")
 
             plt.tight_layout()
             st.pyplot(fig_h)
             plt.close(fig_h)
 
-            st.markdown("""
-            **说明：**
-            - **Parity Plot**：点越贴近对角线，拟合越好
-            - **R²**：决定系数，1.0 为完美拟合
-            - **RMSE**：均方根误差，越小越好
-            - **MAPE**：平均绝对百分比误差，越小越好
-            - **残差直方图**：以 0 为中心、分布越窄越好，偏移说明系统偏差
-            """)
+            st.markdown(f"""
+**说明：**
+- **训练集**（圆点）= 模型训练时使用的数据；**验证集**（菱形）= φ={VAL_PHI}，训练时被留出未参与训练
+- **训练集 R²** 反映拟合能力，**验证集 R²** 反映泛化能力
+- 目前仅辐射数据含 φ={VAL_PHI} 验证样本；温度和碳烟无此 φ 的实验数据，全部为训练集
+- 若需更可靠的泛化评估，建议补充独立实验数据或采用 k-fold 交叉验证（需重新训练）
+""")
 
 
 if __name__ == "__main__":
