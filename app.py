@@ -312,8 +312,8 @@ def main():
     st.sidebar.success(f"✅ 模型已加载 ({model.count_parameters():,} 参数)")
 
     # ─── Tab 切换 ───
-    tab1, tab2, tab3 = st.tabs([
-        "🔬 正向预测", "🎯 逆向设计", "🗺️ 编程地图"])
+    tab1, tab2, tab3, tab4 = st.tabs([
+        "🔬 正向预测", "🎯 逆向设计", "🗺️ 编程地图", "📊 模型验证"])
 
     # ======================== Tab 1: 正向预测 ========================
     with tab1:
@@ -458,6 +458,233 @@ def main():
         - **颜色**：辐射热通量大小
         - 颜色越亮 → 辐射越强 → 碳烟越多
         """)
+
+
+    # ======================== Tab 4: 模型验证 ========================
+    with tab4:
+        st.header("模型验证：预测 vs 实验")
+        st.markdown("用训练数据评估模型拟合质量。展示逐点对比、分条件剖面、误差统计。")
+
+        # 加载实验数据
+        data_dir = os.path.join(_BASE_DIR, "data")
+        temp_path = os.path.join(data_dir, "temperature.csv")
+        rad_path = os.path.join(data_dir, "radiation.csv")
+        soot_path = os.path.join(data_dir, "soot.csv")
+
+        if not os.path.exists(temp_path):
+            st.warning("未找到 data/ 目录下的实验数据 CSV，无法进行验证。")
+        else:
+            df_temp = pd.read_csv(temp_path)
+            df_rad = pd.read_csv(rad_path) if os.path.exists(rad_path) else None
+            df_soot = pd.read_csv(soot_path) if os.path.exists(soot_path) else None
+
+            z_max = cfg["physics"]["z_max"]
+            phi_lo, phi_hi = PHI_RANGE
+
+            # ---------- 温度预测 ----------
+            phi_norms_t = ((df_temp["phi"] - phi_lo) / (phi_hi - phi_lo)).values
+            z_norms_t = (df_temp["hab_mm"].values / 1000.0) / z_max
+            fuel_ids_t = df_temp["fuel_id"].values.astype(int)
+            x_prec_t = np.where(fuel_ids_t == 1, 1.0, 0.0)
+            T_exp = df_temp["T_K"].values
+
+            inp_t = torch.zeros(len(df_temp), 4)
+            inp_t[:, 0] = torch.tensor(phi_norms_t, dtype=torch.float32)
+            inp_t[:, 1] = torch.tensor(z_norms_t, dtype=torch.float32)
+            inp_t[:, 2] = 0.0
+            inp_t[:, 3] = torch.tensor(x_prec_t, dtype=torch.float32)
+            fid_t = torch.tensor(fuel_ids_t, dtype=torch.long)
+
+            with torch.no_grad():
+                out_t = model(inp_t.to(device), fid_t.to(device))
+            T_pred = out_t["T"].squeeze().cpu().numpy()
+
+            # ---------- 辐射预测 ----------
+            q_exp, q_pred = None, None
+            if df_rad is not None and len(df_rad) > 0:
+                phi_norms_r = ((df_rad["phi"] - phi_lo) / (phi_hi - phi_lo)).values
+                z_norms_r = np.minimum((df_rad["hab_index"].values + 1) * 5.0 / 1000.0 / z_max, 1.0)
+                fuel_ids_r = df_rad["fuel_id"].values.astype(int)
+                x_prec_r = np.where(fuel_ids_r == 1, 1.0, 0.0)
+                q_exp = df_rad["q_rad_Wm2"].values
+
+                qp_list = []
+                for k in range(len(df_rad)):
+                    inp_r = torch.tensor([[phi_norms_r[k], z_norms_r[k], 0.0, x_prec_r[k]]], dtype=torch.float32, device=device)
+                    fid_r = torch.tensor([fuel_ids_r[k]], dtype=torch.long, device=device)
+                    with torch.no_grad():
+                        rr = model.compute_radiation(inp_r, fid_r)
+                    qp_list.append(rr["q_rad"].item())
+                q_pred = np.array(qp_list)
+
+            # ---------- 碳烟预测 ----------
+            fv_exp, fv_pred = None, None
+            if df_soot is not None and len(df_soot) > 0:
+                from src.data.preprocess import FUEL_NAME_TO_ID
+                df_sv = df_soot.dropna(subset=["hab_mm"]).copy()
+                if len(df_sv) > 0:
+                    sv_fuel = df_sv["fuel_name"].map(FUEL_NAME_TO_ID).fillna(0).astype(int).values
+                    sv_phi = ((df_sv["phi"].values - phi_lo) / (phi_hi - phi_lo))
+                    sv_z = (df_sv["hab_mm"].values / 1000.0) / z_max
+                    sv_xp = np.where(sv_fuel == 1, 1.0, 0.0)
+                    fv_exp = df_sv["fv_mean"].values
+
+                    inp_s = torch.zeros(len(df_sv), 4)
+                    inp_s[:, 0] = torch.tensor(sv_phi, dtype=torch.float32)
+                    inp_s[:, 1] = torch.tensor(sv_z, dtype=torch.float32)
+                    inp_s[:, 3] = torch.tensor(sv_xp, dtype=torch.float32)
+                    fid_s = torch.tensor(sv_fuel, dtype=torch.long)
+                    with torch.no_grad():
+                        out_s = model(inp_s.to(device), fid_s.to(device))
+                    fv_pred = out_s["fv"].squeeze().cpu().numpy()
+
+            # ==================== 可视化 ====================
+            # --- 1. Parity Plots ---
+            st.subheader("1 · 预测值 vs 实测值 (Parity Plot)")
+            n_parity = 1 + (1 if q_exp is not None else 0) + (1 if fv_exp is not None else 0)
+            fig_p, axes_p = plt.subplots(1, n_parity, figsize=(5 * n_parity, 5))
+            if n_parity == 1:
+                axes_p = [axes_p]
+
+            def _parity(ax, y_true, y_pred, label, unit, color):
+                ax.scatter(y_true, y_pred, s=10, alpha=0.6, c=color, edgecolors="none")
+                lo = min(y_true.min(), y_pred.min())
+                hi = max(y_true.max(), y_pred.max())
+                margin = (hi - lo) * 0.05
+                ax.plot([lo - margin, hi + margin], [lo - margin, hi + margin],
+                        "k--", linewidth=1, label="理想线 y=x")
+                ss_res = np.sum((y_true - y_pred) ** 2)
+                ss_tot = np.sum((y_true - y_true.mean()) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+                rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+                ax.set_xlabel(f"实测 {label} ({unit})")
+                ax.set_ylabel(f"预测 {label} ({unit})")
+                ax.set_title(f"{label}\nR²={r2:.4f}  RMSE={rmse:.1f}")
+                ax.legend(fontsize=8)
+                ax.set_aspect("equal", adjustable="box")
+                ax.grid(True, alpha=0.3)
+
+            idx = 0
+            _parity(axes_p[idx], T_exp, T_pred, "温度 T", "K", "#e74c3c")
+            idx += 1
+            if q_exp is not None:
+                _parity(axes_p[idx], q_exp, q_pred, "辐射 q_rad", "W/m²", "#3498db")
+                idx += 1
+            if fv_exp is not None:
+                _parity(axes_p[idx], fv_exp, fv_pred, "碳烟 fv", "ppm", "#2c3e50")
+
+            plt.tight_layout()
+            st.pyplot(fig_p)
+            plt.close(fig_p)
+
+            # --- 2. 逐 φ 温度剖面 ---
+            st.subheader("2 · 逐当量比温度剖面对比")
+            val_fuel = st.selectbox("选择燃料", [0, 1, 2],
+                                    format_func=lambda x: FUEL_NAMES[x],
+                                    key="val_fuel")
+            df_tf = df_temp[df_temp["fuel_id"] == val_fuel]
+            phis_avail = sorted(df_tf["phi"].unique())
+            n_phi = len(phis_avail)
+            if n_phi > 0:
+                ncols = min(n_phi, 4)
+                nrows = (n_phi + ncols - 1) // ncols
+                fig_t, axes_t = plt.subplots(nrows, ncols, figsize=(4.5 * ncols, 4 * nrows),
+                                              squeeze=False)
+                for pi, phi_val in enumerate(phis_avail):
+                    ax = axes_t[pi // ncols][pi % ncols]
+                    sub = df_tf[df_tf["phi"] == phi_val].sort_values("hab_mm")
+                    hab_exp = sub["hab_mm"].values
+                    t_exp_sub = sub["T_K"].values
+                    # 模型预测曲线
+                    z_dense = np.linspace(hab_exp.min(), hab_exp.max(), 60)
+                    phi_n = (phi_val - phi_lo) / (phi_hi - phi_lo)
+                    xp = 1.0 if val_fuel == 1 else 0.0
+                    inp_d = torch.zeros(60, 4)
+                    inp_d[:, 0] = phi_n
+                    inp_d[:, 1] = torch.tensor(z_dense / 1000.0 / z_max, dtype=torch.float32)
+                    inp_d[:, 3] = xp
+                    fid_d = torch.full((60,), val_fuel, dtype=torch.long)
+                    with torch.no_grad():
+                        t_dense = model(inp_d.to(device), fid_d.to(device))["T"].squeeze().cpu().numpy()
+                    ax.plot(z_dense, t_dense, "r-", linewidth=1.5, label="PINN 预测")
+                    ax.scatter(hab_exp, t_exp_sub, c="k", s=20, zorder=5, label="实验")
+                    ax.set_title(f"φ = {phi_val}")
+                    ax.set_xlabel("HAB (mm)")
+                    ax.set_ylabel("T (K)")
+                    ax.legend(fontsize=7)
+                    ax.grid(True, alpha=0.3)
+                for pi in range(n_phi, nrows * ncols):
+                    axes_t[pi // ncols][pi % ncols].set_visible(False)
+                plt.tight_layout()
+                st.pyplot(fig_t)
+                plt.close(fig_t)
+
+            # --- 3. 误差统计表 ---
+            st.subheader("3 · 误差统计汇总")
+            stats = []
+
+            def _stats(name, y_true, y_pred):
+                rmse = np.sqrt(np.mean((y_true - y_pred) ** 2))
+                ss_res = np.sum((y_true - y_pred) ** 2)
+                ss_tot = np.sum((y_true - y_true.mean()) ** 2)
+                r2 = 1 - ss_res / ss_tot if ss_tot > 0 else 0
+                mask = np.abs(y_true) > 1e-6
+                mape = np.mean(np.abs((y_true[mask] - y_pred[mask]) / y_true[mask])) * 100 if mask.any() else float("nan")
+                return {"指标": name, "样本数": len(y_true), "RMSE": f"{rmse:.2f}",
+                        "R²": f"{r2:.4f}", "MAPE (%)": f"{mape:.1f}"}
+
+            stats.append(_stats("温度 T (K)", T_exp, T_pred))
+            if q_exp is not None:
+                stats.append(_stats("辐射 q_rad (W/m²)", q_exp, q_pred))
+            if fv_exp is not None:
+                stats.append(_stats("碳烟 fv (ppm)", fv_exp, fv_pred))
+
+            st.table(pd.DataFrame(stats))
+
+            # --- 4. 残差分布 ---
+            st.subheader("4 · 残差分布直方图")
+            fig_h, axes_h = plt.subplots(1, n_parity, figsize=(5 * n_parity, 4))
+            if n_parity == 1:
+                axes_h = [axes_h]
+
+            idx = 0
+            res_T = T_pred - T_exp
+            axes_h[idx].hist(res_T, bins=30, color="#e74c3c", alpha=0.7, edgecolor="white")
+            axes_h[idx].axvline(0, color="k", linestyle="--")
+            axes_h[idx].set_xlabel("温度残差 (K)")
+            axes_h[idx].set_ylabel("计数")
+            axes_h[idx].set_title(f"温度残差  均值={res_T.mean():.1f}  标准差={res_T.std():.1f}")
+            idx += 1
+
+            if q_exp is not None:
+                res_q = q_pred - q_exp
+                axes_h[idx].hist(res_q, bins=20, color="#3498db", alpha=0.7, edgecolor="white")
+                axes_h[idx].axvline(0, color="k", linestyle="--")
+                axes_h[idx].set_xlabel("辐射残差 (W/m²)")
+                axes_h[idx].set_ylabel("计数")
+                axes_h[idx].set_title(f"辐射残差  均值={res_q.mean():.1f}  标准差={res_q.std():.1f}")
+                idx += 1
+
+            if fv_exp is not None:
+                res_fv = fv_pred - fv_exp
+                axes_h[idx].hist(res_fv, bins=20, color="#2c3e50", alpha=0.7, edgecolor="white")
+                axes_h[idx].axvline(0, color="k", linestyle="--")
+                axes_h[idx].set_xlabel("碳烟残差 (ppm)")
+                axes_h[idx].set_ylabel("计数")
+                axes_h[idx].set_title(f"碳烟残差  均值={res_fv.mean():.2f}  标准差={res_fv.std():.2f}")
+
+            plt.tight_layout()
+            st.pyplot(fig_h)
+            plt.close(fig_h)
+
+            st.markdown("""
+            **说明：**
+            - **Parity Plot**：点越贴近对角线，拟合越好
+            - **R²**：决定系数，1.0 为完美拟合
+            - **RMSE**：均方根误差，越小越好
+            - **MAPE**：平均绝对百分比误差，越小越好
+            - **残差直方图**：以 0 为中心、分布越窄越好，偏移说明系统偏差
+            """)
 
 
 if __name__ == "__main__":
