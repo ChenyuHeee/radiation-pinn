@@ -312,8 +312,8 @@ def main():
     st.sidebar.success(f"✅ 模型已加载 ({model.count_parameters():,} 参数)")
 
     # ─── Tab 切换 ───
-    tab1, tab2, tab3, tab4 = st.tabs([
-        "🔬 正向预测", "🎯 逆向设计", "🗺️ 编程地图", "📊 模型验证"])
+    tab1, tab2, tab3, tab4, tab5 = st.tabs([
+        "🔬 正向预测", "🎯 逆向设计", "🗺️ 编程地图", "📊 模型验证", "📖 模型说明"])
 
     # ======================== Tab 1: 正向预测 ========================
     with tab1:
@@ -747,6 +747,229 @@ def main():
 - **训练集 R²** 反映拟合能力，**验证集 R²** 反映泛化能力
 - 目前仅辐射数据含 φ={VAL_PHI} 验证样本；温度和碳烟无此 φ 的实验数据，全部为训练集
 - 若需更可靠的泛化评估，建议补充独立实验数据或采用 k-fold 交叉验证（需重新训练）
+""")
+
+
+    # ======================== Tab 5: 模型说明 ========================
+    with tab5:
+        st.header("模型架构与训练方法")
+
+        st.markdown(r"""
+## 1 · 项目定位
+
+**RadiationPINN** 是一个基于物理信息神经网络（Physics-Informed Neural Network）的
+火焰辐射预测与编程系统。
+它以碳烟前驱体掺混比 $x_{\mathrm{prec}}$ 和当量比 $\phi$ 作为"编程因子"，
+通过可微分物理约束实现 **"辐射编程"** ——
+即在给定燃料与工况下，正向预测或逆向优化辐射热通量 $q_{\mathrm{rad}}$。
+
+---
+
+## 2 · 网络架构
+
+```
+输入: (φ, z, r, x_prec, fuel_id)
+  │
+  ├─ φ (1维) ─────────────────┐
+  ├─ z → 傅里叶编码 (12维) ───┤
+  ├─ r → 傅里叶编码 (12维) ───┤ 拼接 → 34维
+  ├─ x_prec (1维) ────────────┤
+  └─ fuel_id → Embedding (8维)┘
+           │
+     ┌─────▼──────┐
+     │ SharedTrunk │  3 × ResBlock (128维)
+     │  + GELU     │
+     └─────┬──────┘
+           │ h (128维)
+     ┌─────┼─────────────────┐
+     │     │                 │
+  ┌──▼──┐ ┌──▼──┐    ┌───────▼──────┐
+  │ T_net│ │Y_net│    │  SootNet     │
+  │→ T  │ │→ Yₖ │    │(h,T,Y_prec,  │
+  └─────┘ └─────┘    │ Y_O₂) → fᵥ  │
+                     └───────┬──────┘
+                             │
+                    ┌────────▼────────┐
+                    │ RTE 物理约束层   │
+                    │ κ → S → ∫ → q_rad│
+                    └─────────────────┘
+```
+
+### 关键设计要点
+
+| 模块 | 设计 | 说明 |
+|------|------|------|
+| **傅里叶编码** | L=6, 各生成 2L=12 维 | 捕捉空间高频特征 |
+| **燃料 Embedding** | 3 种燃料 → 8 维向量 | 共享架构、差异化表示 |
+| **SharedTrunk** | 128 维 × 3 ResBlock + GELU | 提取通用火焰特征 |
+| **温度子网络 T_net** | Softplus 激活 × 2000 + 300 | 保证 T > 300K (物理约束) |
+| **组分子网络 Y_net** | Softmax 归一化 (6组分) | 保证 ΣYₖ = 1 |
+| **碳烟子网络 SootNet** | 因果级联: 接收 T, Y_prec, Y_O₂ | 碳烟生成依赖温度和前驱体浓度 |
+| **RTE 物理层** | 可微分径向积分 | $q_{\mathrm{rad}} = 2\int S \cdot e^{-\tau} \, dr$ |
+
+""")
+
+        # 动态显示参数量
+        n_params = model.count_parameters()
+        st.metric("模型总参数量", f"{n_params:,}")
+
+        st.markdown(r"""
+---
+
+## 3 · 物理约束体系
+
+模型通过三大物理方程对网络施加约束，使预测满足物理规律：
+
+### 3.1 能量守恒方程
+
+$$\rho c_p \frac{\partial T}{\partial t} = \nabla \cdot (\lambda \nabla T) + \dot{Q}_{\mathrm{chem}} - \nabla \cdot q_{\mathrm{rad}}$$
+
+- 热传导 + 化学反应放热 − 辐射散热 = 0
+- 辐射项通过 RTE 层反向耦合
+
+### 3.2 碳烟输运方程 (Moss-Brookes 模型)
+
+$$\frac{\partial f_v}{\partial t} = \underbrace{C_\alpha e^{-T_\alpha/T}}_\text{成核} + \underbrace{C_\beta e^{-T_\beta/T} f_v}_\text{表面生长} - \underbrace{C_\omega T^{0.5} e^{-T_\omega/T} f_v}_\text{氧化}$$
+
+- 包含 **6 个可学习 Arrhenius 参数** ($C_\alpha, T_\alpha, C_\beta, T_\beta, C_\omega, T_\omega$)
+- 不同燃料通过梯度自适应调整动力学参数
+
+### 3.3 辐射传递方程 (RTE)
+
+$$q_{\mathrm{rad}}(z) = 2 \int_0^{r_{\max}} \kappa \sigma T^4 / \pi \cdot e^{-\int_0^r \kappa \, dr'} \, dr$$
+
+- 吸收系数: $\kappa = \frac{6\pi E(m)}{\lambda} \cdot f_v$
+- 其中 $E(m) = 0.37$, $\lambda = 633\,\mathrm{nm}$ (He-Ne 激光波长)
+- 通过 PyTorch autograd **可微分积分**, 梯度可回传
+
+""")
+
+        st.markdown(r"""
+---
+
+## 4 · 损失函数
+
+$$\mathcal{L} = \mathcal{L}_{\mathrm{data}} + w_{\mathrm{PDE}} \cdot \mathcal{L}_{\mathrm{PDE}} + \mathcal{L}_{\mathrm{BC}}$$
+
+| 损失项 | 内容 | 说明 |
+|--------|------|------|
+| $\mathcal{L}_{\mathrm{data}}$ | 温度 + 辐射 + 碳烟 MSE | 监督实验数据拟合 |
+| $\mathcal{L}_{\mathrm{PDE}}$ | 能量方程残差 + 碳烟输运残差 | 物理规律约束 |
+| $\mathcal{L}_{\mathrm{BC}}$ | 边界条件 (T → T_amb, fv → 0) | 火焰边界物理一致性 |
+
+- PDE 权重 $w_{\mathrm{PDE}}$ 在训练过程中从 0 线性增长到 1（课程式注入）
+- Arrhenius 源项使用 tanh 压缩 + 梯度截断防止训练爆炸
+
+""")
+
+        st.markdown(r"""
+---
+
+## 5 · 四阶段课程式训练
+
+训练采用分阶段策略，从纯数据驱动逐步过渡到物理约束联合优化：
+
+""")
+
+        # 训练阶段表格
+        phases_data = [
+            {"阶段": "① Warm-up", "Epochs": "0 – 2,000", "学习率": "1×10⁻³",
+             "PDE": "❌", "BC": "❌", "说明": "纯数据预热，建立基础拟合"},
+            {"阶段": "② Physics Injection", "Epochs": "2,000 – 7,000", "学习率": "3×10⁻⁴",
+             "PDE": "0→1 线性", "BC": "❌", "说明": "物理约束渐进注入，避免冲突"},
+            {"阶段": "③ Joint Fine-tuning", "Epochs": "7,000 – 10,000", "学习率": "1×10⁻⁴",
+             "PDE": "✅", "BC": "✅", "说明": "全约束联合优化，后段切换 L-BFGS"},
+            {"阶段": "④ Transfer", "Epochs": "10,000 – 11,000", "学习率": "1×10⁻⁵",
+             "PDE": "✅", "BC": "✅", "说明": "冻结 Trunk，仅调子网络，新燃料迁移"},
+        ]
+        st.table(pd.DataFrame(phases_data))
+
+        st.markdown(r"""
+---
+
+## 6 · 实验数据
+
+| 数据类型 | 燃料覆盖 | 当量比 φ | 测点数 |
+|---------|---------|---------|--------|
+| 温度 T (K) | 乙烯、甲苯、甲醇 | 0.8 – 1.0 | ~732 |
+| 辐射 q_rad (W/m²) | 乙烯、甲苯 | 0.8 – 1.2 | ~196 |
+| 碳烟 fv (ppm) | 甲苯 | 0.8 – 0.9 | ~111 |
+
+- 温度数据来自多 HAB (5–90 mm) 位置的热电偶测量
+- 辐射数据来自多角度辐射计的侧向积分通量
+- 碳烟体积分数来自激光消光法 / LII 测量
+- 训练时 φ=1.1 的辐射数据被留出作为验证集
+
+""")
+
+        st.markdown(r"""
+---
+
+## 7 · 物理常数与超参数
+""")
+
+        col_phys, col_hyper = st.columns(2)
+        with col_phys:
+            st.markdown("**物理常数**")
+            st.table(pd.DataFrame([
+                {"参数": "σ (Stefan-Boltzmann)", "值": "5.67×10⁻⁸ W/(m²·K⁴)"},
+                {"参数": "E(m) 碳烟吸收函数", "值": "0.37"},
+                {"参数": "λ 激光波长", "值": "633 nm (He-Ne)"},
+                {"参数": "r_max 径向范围", "值": "15 mm"},
+                {"参数": "z_max 轴向范围", "值": "90 mm"},
+                {"参数": "T_amb 环境温度", "值": "300 K"},
+            ]))
+        with col_hyper:
+            st.markdown("**训练超参数**")
+            st.table(pd.DataFrame([
+                {"参数": "优化器", "值": "Adam → L-BFGS"},
+                {"参数": "权重衰减", "值": "1×10⁻⁵"},
+                {"参数": "调度器", "值": "Cosine Annealing"},
+                {"参数": "PDE 配点/epoch", "值": "10,000"},
+                {"参数": "边界点/epoch", "值": "2,000"},
+                {"参数": "总 Epochs", "值": "11,000"},
+            ]))
+
+        st.markdown(r"""
+---
+
+## 8 · Arrhenius 可学习参数
+
+碳烟动力学的 6 个 Arrhenius 参数由网络自动学习（初始值 → 训练后）：
+""")
+
+        arr_data = [
+            {"参数": "C_α (成核系数)", "初始值": "exp(0)=1.0",
+             "训练值": f"{torch.exp(model.log_C_alpha).item():.4f}",
+             "物理意义": "碳烟粒子成核速率前因子"},
+            {"参数": "T_α (成核活化温度)", "初始值": "21000 K",
+             "训练值": f"{model.T_alpha.item():.0f} K",
+             "物理意义": "成核反应活化能 / k_B"},
+            {"参数": "C_β (生长系数)", "初始值": "exp(0)=1.0",
+             "训练值": f"{torch.exp(model.log_C_beta).item():.4f}",
+             "物理意义": "表面生长速率前因子"},
+            {"参数": "T_β (生长活化温度)", "初始值": "12100 K",
+             "训练值": f"{model.T_beta.item():.0f} K",
+             "物理意义": "表面生长活化能 / k_B"},
+            {"参数": "C_ω (氧化系数)", "初始值": "exp(0)=1.0",
+             "训练值": f"{torch.exp(model.log_C_omega).item():.4f}",
+             "物理意义": "氧化消耗速率前因子"},
+            {"参数": "T_ω (氧化活化温度)", "初始值": "19680 K",
+             "训练值": f"{model.T_omega.item():.0f} K",
+             "物理意义": "氧化反应活化能 / k_B"},
+        ]
+        st.table(pd.DataFrame(arr_data))
+
+        st.markdown(r"""
+---
+
+## 9 · 技术栈
+
+- **深度学习框架**: PyTorch ≥ 2.0
+- **Web 应用**: Streamlit
+- **可视化**: Matplotlib
+- **物理编码**: 自定义可微分 RTE 积分层 (PyTorch autograd)
+- **部署**: Streamlit Cloud (CPU 推理, 单次预测 < 1 ms)
 """)
 
 
