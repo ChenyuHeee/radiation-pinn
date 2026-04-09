@@ -22,11 +22,18 @@ from src.training.trainer import get_device
 
 # ─── 中文字体 ───
 import matplotlib.font_manager as fm
-# 优先使用 Noto Sans CJK（Streamlit Cloud apt 安装），其次 macOS 字体
-_cjk_fonts = ["Noto Sans CJK SC", "PingFang SC", "SimHei",
-              "Arial Unicode MS", "DejaVu Sans"]
-# 刷新字体缓存以识别新安装的字体
-fm._load_fontmanager(try_read_cache=False)
+import glob as _glob
+
+# Streamlit Cloud (Linux): fonts-noto-cjk 安装 OTF 到 /usr/share/fonts
+# matplotlib 默认不扫描 OTF 目录，需要手动注册
+for _d in ["/usr/share/fonts/opentype/noto", "/usr/share/fonts/noto",
+           "/usr/share/fonts/truetype/noto"]:
+    for _f in _glob.glob(_d + "/*CJK*"):
+        fm.fontManager.addfont(_f)
+
+_cjk_fonts = ["Noto Sans CJK SC", "Noto Sans CJK JP",
+              "PingFang SC", "Heiti SC", "STHeiti", "Hiragino Sans GB",
+              "SimHei", "Arial Unicode MS", "DejaVu Sans"]
 plt.rcParams["font.sans-serif"] = _cjk_fonts
 plt.rcParams["axes.unicode_minus"] = False
 
