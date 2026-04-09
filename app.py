@@ -319,8 +319,9 @@ def main():
     st.sidebar.success(f"✅ 模型已加载 ({model.count_parameters():,} 参数)")
 
     # ─── Tab 切换 ───
-    tab1, tab2, tab3, tab4, tab5 = st.tabs([
-        "🔬 正向预测", "🎯 逆向设计", "🗺️ 编程地图", "📊 模型验证", "📖 模型说明"])
+    tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+        "🔬 正向预测", "🎯 逆向设计", "🗺️ 编程地图", "📊 模型验证",
+        "🔍 模型可解释性", "📖 模型说明"])
 
     # ======================== Tab 1: 正向预测 ========================
     with tab1:
@@ -757,8 +758,360 @@ def main():
 """)
 
 
-    # ======================== Tab 5: 模型说明 ========================
+    # ======================== Tab 5: 模型可解释性 ========================
     with tab5:
+        st.header("模型可解释性：从输入到输出的信号流")
+        st.markdown("选择工况参数，实时追踪数据在网络每一层中的变换过程。")
+
+        # ---- 用户选择工况 ----
+        ei_col1, ei_col2, ei_col3, ei_col4 = st.columns(4)
+        with ei_col1:
+            ei_phi = st.slider("当量比 φ", 0.8, 1.4, 1.0, 0.05, key="ei_phi")
+        with ei_col2:
+            ei_xp = st.slider("掺混比 x_prec", 0.0, 1.0, 0.0, 0.05, key="ei_xp")
+        with ei_col3:
+            ei_fuel = st.selectbox("燃料", [0, 1, 2],
+                                   format_func=lambda x: FUEL_NAMES[x], key="ei_fuel")
+        with ei_col4:
+            ei_hab = st.slider("HAB (mm)", 5, 90, 45, 5, key="ei_hab")
+
+        z_max = cfg["physics"]["z_max"]
+        phi_lo, phi_hi = PHI_RANGE
+        phi_n = (ei_phi - phi_lo) / (phi_hi - phi_lo)
+        z_n = (ei_hab / 1000.0) / z_max
+        xp_val = ei_xp
+
+        inp = torch.tensor([[phi_n, z_n, 0.0, xp_val]], dtype=torch.float32, device=device)
+        fid = torch.tensor([ei_fuel], dtype=torch.long, device=device)
+
+        # ========== Stage 1: 输入编码 ==========
+        st.subheader("Stage 1 · 输入编码")
+
+        with torch.no_grad():
+            phi_raw = inp[:, 0:1]
+            z_raw = inp[:, 1:2]
+            r_raw = inp[:, 2:3]
+            xp_raw = inp[:, 3:4]
+            z_enc = model.fourier_z(z_raw)
+            r_enc = model.fourier_r(r_raw)
+            fuel_enc = model.fuel_embed(fid)
+            encoded = torch.cat([phi_raw, z_enc, r_enc, xp_raw, fuel_enc], dim=-1)
+
+        enc_np = encoded.cpu().numpy().flatten()
+
+        col_enc1, col_enc2 = st.columns([2, 3])
+        with col_enc1:
+            st.markdown(f"""
+**原始输入** → **编码后 {len(enc_np)} 维向量**
+
+| 分量 | 维度 | 值 |
+|------|------|-----|
+| φ (标量) | 1 | {phi_n:.3f} |
+| z 傅里叶 | 12 | sin/cos 编码 |
+| r 傅里叶 | 12 | sin/cos 编码 |
+| x_prec | 1 | {xp_val:.2f} |
+| 燃料 Embed | 8 | 学习向量 |
+""")
+        with col_enc2:
+            fig_enc, ax_enc = plt.subplots(figsize=(8, 2))
+            colors = (["#e74c3c"] * 1 +
+                      ["#3498db"] * 12 +
+                      ["#2ecc71"] * 12 +
+                      ["#f39c12"] * 1 +
+                      ["#9b59b6"] * 8)
+            ax_enc.bar(range(len(enc_np)), enc_np, color=colors, width=1.0, edgecolor="none")
+            ax_enc.set_xlabel("编码维度索引")
+            ax_enc.set_ylabel("值")
+            ax_enc.set_title("输入编码向量 (34维)")
+            # 标注分段
+            for label, start, end, c in [("φ", 0, 1, "#e74c3c"),
+                                          ("z-Fourier", 1, 13, "#3498db"),
+                                          ("r-Fourier", 13, 25, "#2ecc71"),
+                                          ("x_prec", 25, 26, "#f39c12"),
+                                          ("Fuel Embed", 26, 34, "#9b59b6")]:
+                mid = (start + end) / 2
+                ax_enc.annotate(label, xy=(mid, ax_enc.get_ylim()[1]),
+                                ha="center", fontsize=7, color=c, weight="bold")
+            ax_enc.grid(True, alpha=0.2)
+            plt.tight_layout()
+            st.pyplot(fig_enc)
+            plt.close(fig_enc)
+
+        # ========== 燃料 Embedding 空间 ==========
+        st.subheader("Stage 1b · 燃料 Embedding 空间")
+        with torch.no_grad():
+            all_fuel_ids = torch.arange(3, device=device)
+            all_embeds = model.fuel_embed(all_fuel_ids).cpu().numpy()
+
+        fig_emb, axes_emb = plt.subplots(1, 2, figsize=(10, 3.5))
+        # 热力图
+        im = axes_emb[0].imshow(all_embeds, aspect="auto", cmap="RdBu_r")
+        axes_emb[0].set_yticks([0, 1, 2])
+        axes_emb[0].set_yticklabels(["乙烯", "甲苯", "甲醇"])
+        axes_emb[0].set_xlabel("Embedding 维度")
+        axes_emb[0].set_title("燃料 Embedding 权重")
+        plt.colorbar(im, ax=axes_emb[0], shrink=0.8)
+        # 相似度
+        from numpy.linalg import norm as np_norm
+        sim_matrix = np.zeros((3, 3))
+        for i in range(3):
+            for j in range(3):
+                ni, nj = np_norm(all_embeds[i]), np_norm(all_embeds[j])
+                sim_matrix[i, j] = np.dot(all_embeds[i], all_embeds[j]) / (ni * nj + 1e-8)
+        im2 = axes_emb[1].imshow(sim_matrix, cmap="YlOrRd", vmin=-1, vmax=1)
+        axes_emb[1].set_xticks([0, 1, 2])
+        axes_emb[1].set_xticklabels(["乙烯", "甲苯", "甲醇"])
+        axes_emb[1].set_yticks([0, 1, 2])
+        axes_emb[1].set_yticklabels(["乙烯", "甲苯", "甲醇"])
+        for i in range(3):
+            for j in range(3):
+                axes_emb[1].text(j, i, f"{sim_matrix[i,j]:.2f}",
+                                 ha="center", va="center", fontsize=10)
+        axes_emb[1].set_title("燃料余弦相似度")
+        plt.colorbar(im2, ax=axes_emb[1], shrink=0.8)
+        plt.tight_layout()
+        st.pyplot(fig_emb)
+        plt.close(fig_emb)
+
+        # ========== Stage 2: SharedTrunk ==========
+        st.subheader("Stage 2 · SharedTrunk 特征提取")
+        with torch.no_grad():
+            # 逐层追踪
+            trunk = model.trunk
+            h_in = trunk.norm_in(torch.nn.functional.silu(trunk.input_proj(encoded.to(device))))
+            activations = [("Input Proj + SiLU + LN", h_in.cpu().numpy().flatten())]
+            h_curr = h_in
+            for bi, block in enumerate(trunk.resblocks):
+                h_curr = block(h_curr)
+                activations.append((f"ResBlock {bi+1}", h_curr.cpu().numpy().flatten()))
+            h_out = trunk.norm_out(torch.nn.functional.silu(trunk.output_proj(h_curr)))
+            activations.append(("Output Proj + SiLU + LN", h_out.cpu().numpy().flatten()))
+
+        n_acts = len(activations)
+        fig_trunk, axes_trunk = plt.subplots(n_acts, 1, figsize=(10, 2 * n_acts), sharex=True)
+        for i, (name, act) in enumerate(activations):
+            ax = axes_trunk[i]
+            ax.bar(range(len(act)), act, color="#3498db", alpha=0.7, width=1.0)
+            ax.set_ylabel("激活值")
+            ax.set_title(f"{name}  (128维)  |  均值={act.mean():.3f}  标准差={act.std():.3f}",
+                         fontsize=9)
+            ax.grid(True, alpha=0.2)
+            ax.axhline(0, color="k", linewidth=0.5)
+        axes_trunk[-1].set_xlabel("神经元索引")
+        plt.tight_layout()
+        st.pyplot(fig_trunk)
+        plt.close(fig_trunk)
+
+        # ========== Stage 3: 子网络输出 ==========
+        st.subheader("Stage 3 · 子网络输出")
+        with torch.no_grad():
+            out = model(inp, fid)
+            T_val = out["T"].item()
+            Y_val = out["Y"].cpu().numpy().flatten()
+            fv_val = out["fv"].item()
+
+        col_s3a, col_s3b, col_s3c = st.columns(3)
+        with col_s3a:
+            st.metric("🌡️ 温度 T", f"{T_val:.1f} K")
+            st.caption("T_net: Softplus × 2000 + 300")
+        with col_s3b:
+            species_names = ["CO₂", "H₂O", "CO", "C₂H₂/C₇H₈", "O₂", "N₂"]
+            fig_sp, ax_sp = plt.subplots(figsize=(4, 3))
+            bars = ax_sp.barh(species_names, Y_val, color=["#e74c3c", "#3498db", "#95a5a6",
+                                                            "#f39c12", "#2ecc71", "#9b59b6"])
+            ax_sp.set_xlabel("质量分数")
+            ax_sp.set_title("组分 Yₖ (Softmax)")
+            for bar, v in zip(bars, Y_val):
+                ax_sp.text(bar.get_width() + 0.01, bar.get_y() + bar.get_height()/2,
+                           f"{v:.4f}", va="center", fontsize=8)
+            ax_sp.set_xlim(0, max(Y_val) * 1.3)
+            plt.tight_layout()
+            st.pyplot(fig_sp)
+            plt.close(fig_sp)
+        with col_s3c:
+            st.metric("🔥 碳烟 fv", f"{fv_val:.4f} ppm")
+            st.caption("SootNet: 因果级联 (h, T, Y_prec, Y_O₂)")
+
+        # ========== Stage 4: RTE 物理积分过程 ==========
+        st.subheader("Stage 4 · RTE 辐射传递积分过程")
+        st.markdown("展示辐射物理层如何将温度场和碳烟场转化为辐射热通量。")
+
+        n_r = cfg["physics"]["r_points"]
+        with torch.no_grad():
+            rad_out = model.compute_radiation(inp, fid, n_r=n_r)
+            T_field = rad_out["T_field"].cpu().numpy().flatten()
+            fv_field = rad_out["fv_field"].cpu().numpy().flatten()
+            q_rad_val = rad_out["q_rad"].item()
+
+            # 手动重算中间物理量用于可视化
+            fv_t = rad_out["fv_field"]
+            T_t = rad_out["T_field"]
+            kappa = model.rte_layer.compute_kappa(fv_t)
+            source = model.rte_layer.compute_source(kappa, T_t)
+            kappa_np = kappa.cpu().numpy().flatten()
+            source_np = source.cpu().numpy().flatten()
+
+        r_mm = np.linspace(0, cfg["physics"]["r_max"] * 1000, n_r)
+
+        fig_rte, axes_rte = plt.subplots(2, 3, figsize=(14, 7))
+
+        # 1: T(r) 温度径向分布
+        axes_rte[0, 0].plot(r_mm, T_field, "r-", linewidth=2)
+        axes_rte[0, 0].fill_between(r_mm, 300, T_field, alpha=0.15, color="red")
+        axes_rte[0, 0].set_ylabel("T (K)")
+        axes_rte[0, 0].set_title("① 温度径向分布 T(r)")
+        axes_rte[0, 0].grid(True, alpha=0.3)
+
+        # 2: fv(r) 碳烟径向分布
+        axes_rte[0, 1].plot(r_mm, fv_field, "k-", linewidth=2)
+        axes_rte[0, 1].fill_between(r_mm, 0, fv_field, alpha=0.2, color="gray")
+        axes_rte[0, 1].set_ylabel("fv (ppm)")
+        axes_rte[0, 1].set_title("② 碳烟径向分布 fv(r)")
+        axes_rte[0, 1].grid(True, alpha=0.3)
+
+        # 3: κ(r) 吸收系数
+        axes_rte[0, 2].plot(r_mm, kappa_np, "b-", linewidth=2)
+        axes_rte[0, 2].fill_between(r_mm, 0, kappa_np, alpha=0.15, color="blue")
+        axes_rte[0, 2].set_ylabel("κ (1/m)")
+        axes_rte[0, 2].set_title("③ 吸收系数 κ = 6πE(m)/λ · fv")
+        axes_rte[0, 2].grid(True, alpha=0.3)
+
+        # 4: S(r) 源项
+        axes_rte[1, 0].plot(r_mm, source_np, "m-", linewidth=2)
+        axes_rte[1, 0].fill_between(r_mm, 0, source_np, alpha=0.15, color="purple")
+        axes_rte[1, 0].set_xlabel("r (mm)")
+        axes_rte[1, 0].set_ylabel("S (W/m³/sr)")
+        axes_rte[1, 0].set_title("④ 辐射源项 S = κσT⁴/π")
+        axes_rte[1, 0].grid(True, alpha=0.3)
+
+        # 5: 累积光学深度
+        with torch.no_grad():
+            kappa_flip = torch.flip(kappa, dims=[-1])
+            r_flip = torch.flip(model.rte_layer.r_grid, dims=[0])
+            tau_flip = model.rte_layer._cumtrapz(kappa_flip, r_flip)
+            tau_flip = torch.cat([torch.zeros_like(tau_flip[..., :1]), tau_flip], dim=-1)
+            tau = torch.flip(tau_flip, dims=[-1]).cpu().numpy().flatten()
+            trans = np.exp(-tau)
+
+        axes_rte[1, 1].plot(r_mm, tau, "g-", linewidth=2, label="光学深度 τ")
+        axes_rte[1, 1].plot(r_mm, trans, "g--", linewidth=1.5, label="透射率 e⁻ᵗ")
+        axes_rte[1, 1].set_xlabel("r (mm)")
+        axes_rte[1, 1].set_ylabel("τ / 透射率")
+        axes_rte[1, 1].set_title("⑤ 光学深度与透射率")
+        axes_rte[1, 1].legend(fontsize=8)
+        axes_rte[1, 1].grid(True, alpha=0.3)
+
+        # 6: 被积函数 S·exp(-τ) → 积分得 q_rad
+        integrand = source_np * trans
+        axes_rte[1, 2].fill_between(r_mm, 0, integrand, alpha=0.4, color="#e67e22",
+                                     label="S · e⁻ᵗ (被积函数)")
+        axes_rte[1, 2].plot(r_mm, integrand, color="#e67e22", linewidth=2)
+        axes_rte[1, 2].set_xlabel("r (mm)")
+        axes_rte[1, 2].set_ylabel("S · e⁻ᵗ")
+        axes_rte[1, 2].set_title(f"⑥ 积分 → q_rad = {q_rad_val:.2f} W/m²")
+        axes_rte[1, 2].legend(fontsize=8)
+        axes_rte[1, 2].grid(True, alpha=0.3)
+
+        for ax in axes_rte.flat:
+            ax.tick_params(labelsize=8)
+        plt.tight_layout()
+        st.pyplot(fig_rte)
+        plt.close(fig_rte)
+
+        st.info(f"**辐射物理链**: T(r) × fv(r) → κ(r) → S(r) → 视线积分 → "
+                f"**q_rad = {q_rad_val:.2f} W/m²** (HAB={ei_hab}mm, φ={ei_phi}, "
+                f"{FUEL_NAMES[ei_fuel]})")
+
+        # ========== Stage 5: 权重分布 ==========
+        st.subheader("Stage 5 · 网络权重分布统计")
+
+        weight_stats = []
+        weight_hists = []
+        for name, param in model.named_parameters():
+            if param.requires_grad and param.dim() >= 1:
+                w = param.detach().cpu().numpy().flatten()
+                weight_stats.append({
+                    "层": name.replace(".", " → "),
+                    "形状": str(list(param.shape)),
+                    "参数量": param.numel(),
+                    "均值": f"{w.mean():.4f}",
+                    "标准差": f"{w.std():.4f}",
+                    "最小": f"{w.min():.4f}",
+                    "最大": f"{w.max():.4f}",
+                })
+                weight_hists.append((name, w))
+
+        with st.expander("📋 各层权重统计表", expanded=False):
+            st.dataframe(pd.DataFrame(weight_stats), use_container_width=True)
+
+        # 权重分布直方图（选取关键层）
+        key_layers = [wh for wh in weight_hists if any(k in wh[0] for k in
+                      ["input_proj.weight", "resblocks.0.fc1.weight",
+                       "resblocks.2.fc2.weight", "output_proj.weight",
+                       "T_net.net.0.weight", "soot_net.net.0.weight",
+                       "Y_net.net.0.weight"])]
+        if len(key_layers) > 0:
+            n_kl = min(len(key_layers), 8)
+            ncols_w = min(n_kl, 4)
+            nrows_w = (n_kl + ncols_w - 1) // ncols_w
+            fig_w, axes_w = plt.subplots(nrows_w, ncols_w, figsize=(4 * ncols_w, 3 * nrows_w))
+            if nrows_w == 1 and ncols_w == 1:
+                axes_w = np.array([[axes_w]])
+            elif nrows_w == 1:
+                axes_w = axes_w[np.newaxis, :]
+            elif ncols_w == 1:
+                axes_w = axes_w[:, np.newaxis]
+            for i, (name, w) in enumerate(key_layers[:n_kl]):
+                ax = axes_w[i // ncols_w][i % ncols_w]
+                ax.hist(w, bins=50, color="#3498db", alpha=0.7, edgecolor="white", density=True)
+                ax.axvline(0, color="k", linestyle="--", linewidth=0.5)
+                short_name = name.split(".")[-2] + "." + name.split(".")[-1] if "." in name else name
+                ax.set_title(f"{short_name}\nμ={w.mean():.3f} σ={w.std():.3f}", fontsize=8)
+                ax.tick_params(labelsize=7)
+            for i in range(n_kl, nrows_w * ncols_w):
+                axes_w[i // ncols_w][i % ncols_w].set_visible(False)
+            plt.suptitle("关键层权重分布", fontsize=11, y=1.01)
+            plt.tight_layout()
+            st.pyplot(fig_w)
+            plt.close(fig_w)
+
+        # ========== 信号流总结 ==========
+        st.subheader("信号流总结")
+        st.markdown(f"""
+```
+                        输入: φ={ei_phi}, HAB={ei_hab}mm, x_prec={ei_xp}, {FUEL_NAMES[ei_fuel]}
+                              │
+                        ┌─────▼─────┐
+                        │ 傅里叶编码 │ → {len(enc_np)}维向量
+                        │ +Embedding │
+                        └─────┬─────┘
+                              │
+                 ┌────────────▼────────────┐
+                 │    SharedTrunk (128维)    │
+                 │ InputProj → 3×ResBlock    │
+                 │ → OutputProj + LayerNorm  │
+                 └────────────┬────────────┘
+                              │ h (128维)
+              ┌───────────────┼───────────────┐
+              │               │               │
+        ┌─────▼─────┐  ┌─────▼─────┐  ┌──────▼──────┐
+        │   T_net    │  │   Y_net    │  │  SootNet    │
+        │ T={T_val:.0f} K  │  │ 6组分      │  │ fv={fv_val:.4f}  │
+        └─────┬─────┘  └─────┬─────┘  │(h+T+Y→fv) │
+              │               │        └──────┬──────┘
+              └───────────────┼───────────────┘
+                              │
+                    ┌─────────▼──────────┐
+                    │  RTE 物理积分层      │
+                    │ κ→S→∫ S·e⁻ᵗ dr     │
+                    │ q_rad={q_rad_val:.2f} W/m²  │
+                    └────────────────────┘
+```
+""")
+
+
+    # ======================== Tab 6: 模型说明 ========================
+    with tab6:
         st.header("模型架构与训练方法")
 
         st.markdown(r"""
